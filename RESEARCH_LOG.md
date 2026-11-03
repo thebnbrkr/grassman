@@ -232,3 +232,53 @@ The seed spread is 0.0–1.1 perplexity for the pair mixers and 2.0 for attentio
   - Early layers put most weight on t−1, with a top weight well above 1/6.
   - Patterns are broadly similar across seeds. Removing t−1 in layer 0 costs the most.
   - sin(angle) is slightly higher after sentence ends. The angle weights stay small.
+
+---
+
+## 2026-11-03 (later): Speed notebook results (A100, commit ca4b164)
+
+### Same numbers
+
+Fast path vs the paper's order, float32, all four kinds, with and without normalisation: max output difference
+≤ 1.2e-6, max gradient difference ≤ 1.9e-9. That is rounding. **Pass.**
+
+### Speed (training tok/s, random tokens, batch 32 × 128, bf16)
+
+| model | fast | paper order | speed-up |
+|---|---|---|---|
+| grassmann | 67,363 | 48,647 | 1.4× |
+| sym | 59,119 | 50,557 | 1.2× |
+| outer | 76,643 | 77,021 | 1.0× |
+| concat | 81,095 | 85,016 | 1.0× |
+| concat32 | 82,926 | 84,515 | 1.0× |
+| g-dilated | 69,239 | 59,200 | 1.2× |
+| g-select / g-both / g-both-angle | 43,808 / 43,786 / 30,849 | — | — |
+| hyena / swa / attention | 231,291 / 268,110 / 287,824 | — | — |
+
+**The prediction was wrong.** 1.4× for `grassmann`, against the predicted 1.5–3×. The fast `grassmann` is still 4.3×
+slower than attention.
+
+### Profile (10 steps)
+
+- **attention:** 10.3 ms/step. matmul 24%, dtype copies 17%, AdamW 16%, log-softmax backward 12%, cross-entropy
+  ~10%. The shared parts (output layer, loss, optimizer, casts) dominate. This was measured on the A100, so the L4
+  question is still unprofiled.
+- **grassmann:** 37.6 ms/step. **The upper-triangle gather's backward (index_put) is 26% of GPU time**, the largest
+  single item, even though it now runs once per layer. Element-wise multiplies are 19%, copies 10%, sums 10%:
+  building six (B, T, r, r) products per layer.
+
+### Finding: the multi-offset layer collapses to one wedge
+
+Every pair shares z_t as its first vector, and the Plücker map is linear in its second argument. So the averaged
+feature is
+
+  Σ_Δ w_Δ · (z_t ∧ z_{t−Δ}) / ‖z_t ∧ z_{t−Δ}‖  =  z_t ∧ b̄_t,   with  b̄_t = Σ_Δ (w_Δ / ‖z_t ∧ z_{t−Δ}‖) · z_{t−Δ}
+
+- **The paper's "multi-scale Grassmann flow" is the wedge of the current token with a weighted average of its
+  past window.** Without normalisation, the weights are uniform and b̄ is a plain causal moving average of z.
+- The same holds for every pair kind: concat becomes [z_t; b̄_t], and sym and outer use z_t ⊗ b̄_t.
+- This may explain why the geometry adds nothing over concat. The layer only ever sees the current token against
+  an average of its past, never a choice among past tokens.
+- **Speed:** b̄_t costs six cheap r-dimensional shifted sums, followed by **one** product and one gather per layer.
+  Folding the gather into the projection weights removes the slow index backward entirely. Exact; not yet
+  implemented.
