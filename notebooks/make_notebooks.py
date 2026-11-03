@@ -39,6 +39,9 @@ else:
 %cd {{REPO}}
 !git log --oneline -1
 !pip install -q datasets transformers
+# drop any grassman modules imported earlier in this runtime, so the code just pulled is what runs
+for _name in [k for k in sys.modules if k == 'grassman' or k.startswith('grassman.')]:
+    del sys.modules[_name]
 """),
         md("Only if you are **resuming this notebook** in a new runtime: set `RESTORE = True` to upload the "
            "`results.zip` it downloaded earlier, so finished runs are skipped. On a first run leave it `False`."),
