@@ -318,3 +318,50 @@ feature is
 - It equals the paper's order in float64 for all kinds, offset sets and lengths (outputs and gradients).
   Two planted bugs were each caught: the folded sign failed 14 tests, the concat scale 7. 187 tests pass.
 - Speed is not measured yet. Re-run `speed.ipynb`.
+
+---
+
+## 2026-11-03 (later): Correction — the "L4" speed runs were on a Tesla T4; A100 one-pair results
+
+### The GPU was a T4
+
+The speed notebook's own record (`speed.json` in the user's results zip, 08:08) says `"gpu": "Tesla T4"`. The
+earlier "L4" speed numbers (attention ~20.6k tok/s, all models stuck at the same ceiling, matmuls on
+`magma_sgemmEx_kernel<float, __nv_bfloat16, ...>`) match this run, so they were very likely T4 runs too. The first
+200-step smoke test cannot be checked, because its device was not pasted.
+
+- **Why everything was slow:** the T4 (Turing, compute capability 7.5) has tensor cores for fp16 but **not
+  bf16**. `torch.cuda.is_bf16_supported()` still returns True, so our code chose bf16 autocast, and every matmul
+  fell back to a slow non-tensor-core kernel.
+- **Fix (not implemented yet):** use fp16 autocast with a GradScaler on GPUs below compute capability 8.0, and
+  bf16 on A100, L4 and H100.
+- The earlier entries that blame "the L4" (the ~43 h estimate and the "shared bottleneck") should be read as T4.
+
+### T4, one-pair version (tok/s)
+
+grassmann 12,306 (paper order 7,810, 1.6×); sym 13,921 (7,887, 1.8×); outer 17,446 (14,431); concat 16,788
+(14,438); concat32 20,251 (19,423); g-dilated 13,963 (9,138, 1.5×); g-select 12,695; g-both 13,258;
+g-both-angle 12,803; hyena 20,760; swa 20,916; attention 20,849.
+
+### A100, one-pair version (commit 905a014)
+
+- **Equivalence:** ≤ 1.2e-6 (output), ≤ 1.9e-9 (gradient).
+- **tok/s:** grassmann 63,641 (paper order 48,571), sym 55,616, outer 73,902, concat 70,640, concat32 69,965,
+  g-select 41,484, g-dilated 66,601, g-both 42,427, g-both-angle 29,600, hyena 214,908, swa 248,355,
+  attention 273,174.
+- **Relative to attention, grassmann is unchanged from the first fix** (0.233 vs 0.234). The whole run was ~5%
+  slower.
+- **Profile:** the index backward is gone, and grassmann GPU time per 10 steps fell 376 → 240 ms. But CPU time is
+  985 ms: the model is **CPU / kernel-launch bound** (~800 small ops per step from the per-offset loop). Attention
+  is partly launch-bound too (259 ms CPU vs 102 ms GPU).
+- **Matmul check:**
+  - bf16 tensor cores work (83–193 TFLOP/s).
+  - Padding the vocabulary 30,522 → 30,528 makes the output-layer matmul 0.77 → 0.40 ms (cuBLAS) and 0.64 →
+    0.33 ms (cuBLASLt).
+  - fp32 15–19 TFLOP/s, TF32 55–93.
+
+### Next speed changes (proposed)
+
+1. fp16 + GradScaler below compute capability 8.0 (T4, V100).
+2. Pad the output-layer vocabulary to a multiple of 8, exact by slicing the logits.
+3. Batch the offset loop into one tensor op and enable `torch.compile` for all models.
