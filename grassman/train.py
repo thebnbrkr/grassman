@@ -125,7 +125,8 @@ def git_commit() -> str:
 
 
 def run_key(r: dict) -> tuple:
-    return (r["tag"], r["config"]["mixer"], r["config"]["normalize"], r["seed"], r["lr"], r["epochs"])
+    c = r["config"]
+    return (r["tag"], c["mixer"], c["normalize"], tuple(c.get("attn_layers", ())), r["seed"], r["lr"], r["epochs"])
 
 
 def already_done(out: Path, key: tuple) -> bool:
@@ -160,12 +161,17 @@ def main(argv=None) -> dict | None:
     ap.add_argument("--skip-existing", action="store_true")
     ap.add_argument("--no-test", action="store_true",
                     help="never touch the test set (the LR sweep uses this)")
+    ap.add_argument("--attn-layers", default="",
+                    help="comma-separated layer indices that use full attention (hybrids), e.g. 5")
+    ap.add_argument("--save", default=None, help="save the best-validation weights here (.pt)")
     args = ap.parse_args(argv)
+    attn_layers = tuple(int(i) for i in args.attn_layers.split(",") if i.strip())
 
     cfg = Config(mixer=args.mixer, block_size=args.block_size, d=args.d, d_ff=4 * args.d,
-                 n_layers=args.n_layers, normalize=not args.no_normalize, dropout=args.dropout)
+                 n_layers=args.n_layers, normalize=not args.no_normalize, dropout=args.dropout,
+                 attn_layers=attn_layers)
     out = Path(args.out)
-    key = (args.tag, cfg.mixer, cfg.normalize, args.seed, args.lr, args.epochs)
+    key = (args.tag, cfg.mixer, cfg.normalize, cfg.attn_layers, args.seed, args.lr, args.epochs)
     if args.skip_existing and already_done(out, key):
         print(f"skip {key}: already in {out}")
         return None
@@ -227,6 +233,8 @@ def main(argv=None) -> dict | None:
         row = {"epoch": epoch, "step": step, "train_loss": float(np.mean(losses)), "val_ppl": val_ppl}
         if val_ppl < best["val_ppl"]:
             best = {"val_ppl": val_ppl, "epoch": epoch, "test_ppl": None, "test_detail": None}
+            if args.save:
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             if not args.no_test:
                 detail = evaluate_detail(model, *test, test_doc, rank, 64, device, amp_dtype)
                 best["test_ppl"], best["test_detail"] = math.exp(detail["nll"]), detail
@@ -249,6 +257,9 @@ def main(argv=None) -> dict | None:
         "torch": torch.__version__, "commit": git_commit(), "history": history,
         "test_detail": best["test_detail"],
     }
+    if args.save:
+        Path(args.save).parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"config": cfg.to_dict(), "state_dict": best_state, "best_epoch": best["epoch"]}, args.save)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a") as f:
         f.write(json.dumps(result) + "\n")

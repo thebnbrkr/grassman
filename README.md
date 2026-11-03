@@ -27,6 +27,15 @@ bert-base-uncased WordPiece, block 128, batch 32, 30 epochs. All models are with
 **Quick pilot on an L4 (~2.5 h):** `notebooks/pilot_l4.ipynb`. It runs 5 models × 2 seeds × 5 epochs on validation only,
 to see whether there is any effect before the full run.
 
+**Follow-up tests** (one notebook each, validation only; rebuild them with `python notebooks/make_notebooks.py`):
+
+| notebook | question | A100 time (estimate) |
+|---|---|---|
+| `speed.ipynb` | does the fast Grassmann layer give identical numbers, how much faster is it, where does time go? | ~5 min |
+| `choose_vs_reach.ipynb` | is the gap to attention about *choosing* which token (learned edge weights) or *reach* (dilated edges)? | ~45 min |
+| `hybrid.ipynb` | how much of the gap does one attention layer recover, and does the local mixer type matter? | ~1 h |
+| `readouts.ipynb` | are the learned edge choices readable, used and meaningful? | ~15 min |
+
 **Full experiment:**
 
 Open `notebooks/grassman_colab.ipynb` in Colab with an L4 GPU and run the cells in order. It clones this repo,
@@ -81,7 +90,7 @@ The protocol in [PROTOCOL.md](PROTOCOL.md) was fixed before any run. In short:
 
 ## Tests
 
-`python -m pytest -q`: 97 tests in about a minute on CPU. They cover:
+`python -m pytest -q`: 187 tests in about 90 s on CPU. They cover:
 
 - **Plücker maths:** the definition, equality with the cross product in 3-D, sign flip under swap, zero for
   parallel vectors, scaling by det(M) within the plane.
@@ -99,11 +108,13 @@ fail.
 ## Layout
 
 ```
-grassman/mixers.py   PairMixer (4 pair kinds), HyenaShortMixer, AttentionMixer
+grassman/mixers.py   PairMixer (4 pair kinds, fast path, optional edge selection), HyenaShortMixer, AttentionMixer
 grassman/model.py    the LM and Config
 grassman/data.py     Wikitext-2 download, tokenisation, blocks
 grassman/train.py    one run -> one JSON line
-grassman/analyze.py  tables, CIs, paired differences, best LR
+grassman/analyze.py  tables, CIs, paired differences, best LR, pilot tables
+grassman/bench.py    speed and fast-vs-paper-order checks
+grassman/readout.py  edge usage, edge ablation, sin(angle) at sentence boundaries
 notebooks/           the Colab notebook
 PROTOCOL.md          evaluation protocol, fixed before any run
 RESEARCH_LOG.md      what we tried and what happened

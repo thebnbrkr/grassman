@@ -13,6 +13,8 @@ def all_mixers():
     for kind in PAIR_KINDS:
         yield f"pair-{kind}", PairMixer(D, kind=kind, r=8)
     yield "pair-antisym-raw", PairMixer(D, kind="antisym", r=8, normalize=False)
+    yield "pair-select", PairMixer(D, kind="antisym", r=8, select=True)
+    yield "pair-select-angle", PairMixer(D, kind="antisym", r=8, select=True, angle=True)
     yield "hyena", HyenaShortMixer(D)
     yield "swa", AttentionMixer(D, n_heads=4, window=16)
     yield "attention", AttentionMixer(D, n_heads=4)

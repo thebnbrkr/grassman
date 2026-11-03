@@ -15,11 +15,23 @@ import torch.nn.functional as F
 
 from .mixers import AttentionMixer, HyenaShortMixer, PairMixer
 
-# mixer name -> (PairMixer kind, reduced width r; None = the kind's matched-budget default)
-PAIR_MIXERS = {"grassmann": ("antisym", None), "sym": ("sym", None), "outer": ("outer", None),
-               "concat": ("concat", None),
-               # exploratory: concat at the paper's r = 32 (64 features), same token compression as grassmann
-               "concat32": ("concat", 32)}
+SHORT = (1, 2, 4, 8, 12, 16)      # the paper's offsets
+LONG = (1, 2, 4, 16, 64, 127)     # same number of edges, reach 127 (the whole 128-token block)
+
+# mixer name -> PairMixer options (windows None = Config.windows)
+PAIR_MIXERS = {
+    "grassmann": dict(kind="antisym"),
+    "sym": dict(kind="sym"),
+    "outer": dict(kind="outer"),
+    "concat": dict(kind="concat"),
+    # exploratory: concat at the paper's r = 32 (64 features), same token compression as grassmann
+    "concat32": dict(kind="concat", r=32),
+    # choose-vs-reach 2x2 on the paper's Plucker features (notebooks/choose_vs_reach.ipynb)
+    "g-select": dict(kind="antisym", select=True),
+    "g-dilated": dict(kind="antisym", windows=LONG),
+    "g-both": dict(kind="antisym", windows=LONG, select=True),
+    "g-both-angle": dict(kind="antisym", windows=LONG, select=True, angle=True),
+}
 MIXERS = (*PAIR_MIXERS, "hyena", "swa", "attention")
 # smaller than the others by design, so excluded from parameter matching
 UNMATCHED = ("concat32",)
@@ -37,6 +49,7 @@ class Config:
     windows: tuple = (1, 2, 4, 8, 12, 16)
     normalize: bool = True         # L2-normalise pair features (paper: yes)
     dropout: float = 0.1
+    attn_layers: tuple = ()        # layer indices that use full attention instead (hybrids)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -44,9 +57,9 @@ class Config:
 
 def make_mixer(cfg: Config) -> nn.Module:
     if cfg.mixer in PAIR_MIXERS:
-        kind, r = PAIR_MIXERS[cfg.mixer]
-        return PairMixer(cfg.d, kind=kind, r=r, windows=cfg.windows,
-                         normalize=cfg.normalize, dropout=cfg.dropout)
+        opts = dict(PAIR_MIXERS[cfg.mixer])
+        opts.setdefault("windows", cfg.windows)
+        return PairMixer(cfg.d, normalize=cfg.normalize, dropout=cfg.dropout, **opts)
     reach = max(cfg.windows)
     if cfg.mixer == "hyena":
         return HyenaShortMixer(cfg.d, filter_len=reach - 1, dropout=cfg.dropout)
@@ -58,10 +71,13 @@ def make_mixer(cfg: Config) -> nn.Module:
 
 
 class Block(nn.Module):
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, layer: int = 0):
         super().__init__()
         self.ln1 = nn.LayerNorm(cfg.d)
-        self.mixer = make_mixer(cfg)
+        if layer in cfg.attn_layers:
+            self.mixer = AttentionMixer(cfg.d, cfg.n_heads, window=None, dropout=cfg.dropout)
+        else:
+            self.mixer = make_mixer(cfg)
         self.ln2 = nn.LayerNorm(cfg.d)
         self.ffn = nn.Sequential(
             nn.Linear(cfg.d, cfg.d_ff), nn.GELU(), nn.Dropout(cfg.dropout),
@@ -79,7 +95,7 @@ class LM(nn.Module):
         self.tok = nn.Embedding(cfg.vocab_size, cfg.d)
         self.pos = nn.Embedding(cfg.block_size, cfg.d)
         self.drop = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
+        self.blocks = nn.ModuleList(Block(cfg, i) for i in range(cfg.n_layers))
         self.ln_f = nn.LayerNorm(cfg.d)
         self.head = nn.Linear(cfg.d, cfg.vocab_size, bias=False)
         self.apply(self._init)

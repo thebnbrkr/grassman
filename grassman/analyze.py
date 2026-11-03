@@ -26,7 +26,8 @@ _T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
         8: 2.306, 9: 2.262, 10: 2.228, 15: 2.131, 20: 2.086, 30: 2.042}
 BASELINE = "grassmann"
 CONFIRMATORY = ("sym", "outer", "concat", "attention")   # fixed in PROTOCOL.md
-ORDER = ("grassmann", "sym", "outer", "concat", "concat32", "hyena", "swa", "attention")
+ORDER = ("grassmann", "sym", "outer", "concat", "concat32", "g-select", "g-dilated", "g-both",
+         "g-both-angle", "hyena", "swa", "attention")
 N_RESAMPLES = 10_000
 LOCAL = 16   # every windowed mixer sees 16 tokens back
 
@@ -93,7 +94,9 @@ def load(path: str | Path, tag: str | None = None) -> list[dict]:
 
 def name(r: dict) -> str:
     c = r["config"]
-    return c["mixer"] + ("" if c["normalize"] else "-raw")
+    attn = c.get("attn_layers") or ()
+    return (c["mixer"] + ("" if c["normalize"] else "-raw")
+            + (f"+attn@{','.join(map(str, attn))}" if attn else ""))
 
 
 def best_lr(rows: list[dict]) -> dict[str, float]:
@@ -114,7 +117,7 @@ def _fmt(m: float, h: float) -> str:
 
 
 def _sorted_names(names) -> list[str]:
-    base = lambda n: n.split("-")[0]
+    base = lambda n: next((o for o in sorted(ORDER, key=len, reverse=True) if n.startswith(o)), n)
     return sorted(names, key=lambda n: (ORDER.index(base(n)) if base(n) in ORDER else 99, n))
 
 
@@ -186,6 +189,27 @@ def _breakdown_tables(by: dict, names: list[str]) -> list[str]:
     return lines
 
 
+def val_table(rows: list[dict], baseline: str = BASELINE) -> str:
+    """Pilot table (validation only): best validation perplexity per model and
+    seed, the seed spread, and the per-seed difference from `baseline`
+    (positive = baseline better)."""
+    by = defaultdict(dict)
+    for r in rows:
+        by[name(r)][r["seed"]] = r["best_val_ppl"]
+    seeds = sorted({s for v in by.values() for s in v})
+    lines = ["| model | " + " | ".join(f"seed {s}" for s in seeds) + f" | mean | spread | vs {baseline} |",
+             "|---|" + "---|" * (len(seeds) + 3)]
+    base = by.get(baseline, {})
+    for n in _sorted_names(by):
+        v = by[n]
+        xs = [v[s] for s in seeds if s in v]
+        diffs = [100 * (v[s] / base[s] - 1) for s in seeds if s in v and s in base]
+        vs = "—" if n == baseline or not diffs else ", ".join(f"{d:+.1f}%" for d in diffs)
+        lines.append(f"| {n} | " + " | ".join(f"{v[s]:.1f}" if s in v else "—" for s in seeds)
+                     + f" | {sum(xs) / len(xs):.1f} | {max(xs) - min(xs):.1f} | {vs} |")
+    return "\n".join(lines)
+
+
 def summary(rows: list[dict]) -> str:
     by = defaultdict(list)
     for r in rows:
@@ -204,11 +228,18 @@ def main(argv=None) -> None:
     ap.add_argument("runs")
     ap.add_argument("--tag", default=None)
     ap.add_argument("--best-lr", action="store_true", help="print {mixer: lr} as JSON")
+    ap.add_argument("--val", action="store_true", help="validation-only pilot table")
+    ap.add_argument("--baseline", default=BASELINE, help="reference model for --val")
     args = ap.parse_args(argv)
     rows = load(args.runs, args.tag)
     if not rows:
         raise SystemExit(f"no runs with tag {args.tag!r} in {args.runs}")
-    print(json.dumps(best_lr(rows)) if args.best_lr else summary(rows))
+    if args.best_lr:
+        print(json.dumps(best_lr(rows)))
+    elif args.val:
+        print(val_table(rows, args.baseline))
+    else:
+        print(summary(rows))
 
 
 if __name__ == "__main__":

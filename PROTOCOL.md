@@ -97,3 +97,9 @@ are reported but not used for claims.
   - Why: in the pilot `concat` matched `grassmann`, but it keeps 248 numbers per token instead of 32. `concat32`
     separates "no geometry" from "less compression".
   - Not part of the confirmatory family, and not parameter-matched (it is smaller). No confirmatory rule changes.
+- **2026-11-03: faster PairMixer.** It averages pair statistics before one projection, gathers once, and takes
+  the norm from a closed form. This is mathematically identical to the paper's order: `tests/test_speed.py` checks
+  outputs and gradients in float64. No rule changes; all full-protocol runs use the fast path.
+- **2026-11-03: follow-up notebooks added.** `choose_vs_reach`, `hybrid`, `readouts` and `speed`. All are
+  exploratory and validation only (`--no-test`), with new model names (`g-select`, `g-dilated`, `g-both`,
+  `g-both-angle`, `+attn@k` hybrids). None is part of the confirmatory family. They were designed after the pilot.

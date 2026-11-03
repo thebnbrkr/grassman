@@ -190,3 +190,45 @@ The seed spread is 0.0–1.1 perplexity for the pair mixers and 2.0 for attentio
   - `grassmann` and `sym` are ~2× slower than `outer` because of the upper-triangle gather.
   - Our block is pre-LN with two residual paths, not the paper's post-LN block. That is fine for Q1 but open
     for Q2.
+
+---
+
+## 2026-11-03 (later): Speed fix, edge-choosing layer, hybrids; predictions before running
+
+**Status:** code and four notebooks written; nothing has run yet. 187 tests pass on CPU.
+
+### What was built
+
+- **Fast PairMixer** (identical maths):
+  - average the per-offset pair statistics, then project once (6× fewer multiply-adds in the projection);
+  - build the average from r×r products, so the upper-triangle gather happens once per layer;
+  - normaliser in closed form (Lagrange's identity for antisym).
+  - `reference_forward` keeps the paper's order. Tests compare outputs and all gradients in float64 for every
+    kind, offset set and length. Planted bugs (sign, missing mask, wrong norm) each fail 10–49 tests.
+- **Edge selection** (`select=True`): a softmax over the offsets, scored GATv2-style from [z_t; z_{t−Δ}] plus a
+  per-offset bias, optionally plus sin(angle). It starts as the equal average (tested). This is graph attention
+  on a causal graph whose edges are the offsets, from the user's GNN idea.
+  - Variants: `g-select` (paper offsets), `g-dilated` (offsets 1, 2, 4, 16, 64, 127, equal weights), `g-both`
+    (dilated plus selection), `g-both-angle`.
+- **Hybrids:** `--attn-layers k` makes layer k full attention.
+- **Readouts:** `--save` keeps the best-validation weights. `readout.py` computes edge usage, edge ablation and
+  sin(angle) at sentence boundaries.
+
+### Predictions, written before any run (guesses; to be checked)
+
+- **speed:** the fast path matches the paper's order to ~1e-5 in float32. `grassmann` and `sym` get ~1.5–3× faster
+  on the A100. In the profile, the shared parts (output layer and loss over 30,522 words, embedding gradient,
+  optimizer) take much of the step on the L4.
+- **choose vs reach:**
+  - Choosing alone and reach alone each help a little (a few %). Both together help most.
+  - `g-both` still stays well behind attention, closing maybe 20–40% of the gap.
+  - Attention's edge at this scale is likely content-based lookup over the whole block (repeated names in an
+    article), which needs both choosing *and* reach.
+- **hybrid:**
+  - One attention layer recovers most (≥ 60%) of each local mixer's gap.
+  - Inside a hybrid, the local mixer type matters little (≤ 3%).
+  - Attention at layer 3 vs layer 6: a small difference.
+- **readouts:**
+  - Early layers put most weight on t−1, with a top weight well above 1/6.
+  - Patterns are broadly similar across seeds. Removing t−1 in layer 0 costs the most.
+  - sin(angle) is slightly higher after sentence ends. The angle weights stay small.
