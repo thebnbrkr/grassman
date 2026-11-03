@@ -426,3 +426,41 @@ Training tok/s, bf16, batch 32 × 128, random tokens. "paper" = the paper's orde
   - Fixed: `throughput` now calls `torch._dynamo.reset()` before compiling.
   - Training runs are separate processes and are not affected.
 - The equivalence (section 1), profile and matmul outputs are not in the zip; to check from the notebook.
+
+---
+
+## 2026-11-03 (later): T4 speed after the three changes (speed (2).ipynb, commit a66bcde)
+
+- **Equivalence:** ≤ 9.5e-7 (output), ≤ 1.9e-9 (gradient). Pass. 210 tests pass on the T4.
+- **Precision chosen:** fp16, as intended.
+- **Matmul check (the cause of the earlier slowness, now confirmed):**
+  - bf16 runs at **1.6 TFLOP/s** (fallback kernel); fp16 at **13.5 TFLOP/s** (8.4× faster); fp32 3.3.
+  - Padding the vocabulary does not help on the T4 (fp16 4.75 → 5.14 ms).
+  - The GPU read 585 MHz of 1590 max at 71 °C during the check, so it may be throttled, and these are lower
+    bounds.
+
+| model | eager | compiled (s) | paper order | eager / paper | compiled / paper |
+|---|---|---|---|---|---|
+| grassmann | 49,393 | 99,113 (56) | 12,007 | 4.1× | **8.3×** |
+| sym | 46,634 | 86,628 (47) | 11,762 | 4.0× | 7.4× |
+| outer | 50,583 | 94,026 (39) | 32,609 | 1.6× | 2.9× |
+| concat | 29,433 | 71,286 (41) | 33,470 | **0.9×** | 2.1× |
+| concat32 | 54,100 | 100,933 (32) | 48,158 | 1.1× | 2.1× |
+| g-select / g-dilated / g-both | 43,188 / 34,278 / 33,258 | 80,912 / 73,292 / 79,420 | — / 13,541 / — | | |
+| g-both-angle / hyena / swa / attention | 32,618 / 57,301 / 61,816 / 59,486 | not measured | | | |
+
+- fp16 lifted attention from ~20.8k (bf16 fallback) to 59.5k tok/s (2.9×).
+- `concat` (r = 248) is slower eager than the paper's order on the T4: its (B, T, E, 248) past tensor is large.
+- The last four "compiled" numbers hit dynamo's recompile limit (warning in the log); this run predates the
+  `torch._dynamo.reset()` fix (43a1058). Compiled attention is still unmeasured on both GPUs.
+
+### What the speed work does and does not show
+
+- **Shows:** with an exact rewrite (one pair per token, batched offsets, compile), the paper's layer costs about
+  the same as attention at length 128 on the A100 (274k vs 263k eager attention). Its slowness in the paper was
+  the implementation, not the idea. That partly supports the paper's efficiency remark ("with further engineering
+  ... can in principle be more scalable").
+- **Does not show:**
+  - anything about quality (pilot: 26% behind attention; Plücker no better than concat);
+  - the linear-scaling advantage, which only matters at long sequences (not tested);
+  - a comparison with *compiled* attention (not yet measured).
