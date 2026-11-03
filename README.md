@@ -23,6 +23,11 @@ bert-base-uncased WordPiece, block 128, batch 32, 30 epochs. All models are with
 
 ## Run it
 
+**Quick pilot on an L4 (~2.5 h):** `notebooks/pilot_l4.ipynb`. It runs 5 models × 2 seeds × 5 epochs on validation only,
+to see whether there is any effect before the full run.
+
+**Full experiment:**
+
 Open `notebooks/grassman_colab.ipynb` in Colab with an L4 GPU and run the cells in order. It clones this repo,
 runs the tests, builds the data, measures speed, sweeps the learning rate per mixer (1 seed, test set untouched),
 runs 3 seeds at each mixer's best LR and prints the results described in [PROTOCOL.md](PROTOCOL.md). Results are

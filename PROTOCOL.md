@@ -85,4 +85,9 @@ are reported but not used for claims.
 
 ## Changes after fixing this protocol
 
-(none yet)
+- **2026-11-03: pilot added (`notebooks/pilot_l4.ipynb`).**
+  - What: `grassmann`, `sym`, `outer`, `concat` and `attention`; 2 seeds × 5 epochs at LR 1e-3.
+  - **Validation only (`--no-test`)**, logged with tag `pilot` in a separate file.
+  - Why: to see cheaply on an L4 whether there is any effect before spending ~9 A100-hours (or ~43 L4-hours) on the full runs.
+  - The pilot does not change any rule above, and its results are exploratory and not used for claims.
+  - It can inform only whether the full run is worth doing, not its settings.

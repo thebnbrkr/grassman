@@ -66,3 +66,75 @@ and limitations and test-informed decisions disclosed.
   per-seed wins, position and frequency breakdowns.
 - The notebook clones from GitHub and saves results under `/content/results`, with no Google Drive.
 - 92 tests pass on CPU.
+
+---
+
+## 2026-11-03 (later): Full read of arXiv 2512.19428v1 and its references; measured speeds; L4 pilot
+
+**Status:** still no real training run. The speeds below come from 200-step checks run by the user on Colab.
+
+### What the paper says, checked against its own text
+
+- **The pairing is written as non-causal.** §3.2 step 2: pairs are (z_t, z_{t+Δ}) "with t + Δ ≤ L", and "we only pair
+  t with positions strictly to its right (future)". No code was released, so we cannot tell whether the runs leaked.
+  Their Grassmann model is *worse* than the transformer, which suggests a writing slip rather than a leak.
+- **The block differs from the reproduction and from ours.** The paper's block is post-LN: ĥ = LN(α⊙h + (1−α)⊙g),
+  then h' = LN(ĥ + FFN(ĥ)). The gate replaces the residual around mixing. The reproduction and this repo use pre-LN
+  (x + mixer(LN x), x + FFN(LN x)) for every mixer. This does not affect Q1 (all pair variants share the block), but
+  it may affect Q2 (the gap to attention).
+- **No training settings.** Only "the same optimizer and learning rate schedule in a shared script", 30 epochs, and
+  batch 32 (L=128) or 16 (L=256). No LM dropout rate (0.1 is given only for the SNLI head).
+- **It reports the best validation perplexity**, selected and reported on the same split. There is no test number
+  for language modelling.
+- **Table 1 vs the text.**
+  - Table 1 pairs 275.7 with 248.4 and 282.3 with 253.6. The text says "275.7, compared to 241.0–253.6" (241.0 is in
+    no table) and pairs 282.3 with 248.4.
+  - The transformer has no window schedule, yet appears twice with different values (248.4 and 253.6). That is a
+    2.1% difference between runs of the same configuration: a free estimate of run-to-run noise.
+- **Gaps:** 11.0% and 11.3% (6 layers), 11.0% (12 layers, block 256). The claim that "the gap appears to narrow as
+  depth increases" is not supported: it is 11.0% in both.
+- **Parameters:** GrassmannLM has 68–70k more parameters per layer than its transformer (6 and 12 layers). That is
+  close to one 256×256 linear layer (65,792), which our layer does not have. Unexplained; no code.
+- **Compute.** The paper says the Plücker projection is "absorbed into O(L d²)". At its own sizes the Grassmann
+  mixer is ~901k multiply-adds per token against ~295k for attention at L=128, about 3× more. The cause is the
+  projection: m·C(r,2)·d = 6·496·256. Because projecting and averaging are both linear, averaging the six
+  normalised Plücker vectors *before* one projection is mathematically the same and costs ~266k, about attention's
+  cost. Not implemented.
+- **SNLI:** one run each. A 0.0027 test-accuracy difference is about 27 of ~9.8k examples, with no variance
+  reported.
+
+### References (14)
+
+- **[1]–[5]:** Transformer, BERT, GPT-2, GPT-3, ViT.
+- **[6], [8]:** WikiText (the same paper twice). **[4], [7]:** GPT-3 (twice). **[9]:** SNLI.
+- **[10]:** Image Transformer.
+- **[11]–[14]:** textbooks and a survey on algebraic geometry, Riemannian manifolds and optimisation on
+  Grassmann/Stiefel manifolds (Hartshorne; Lee; Edelman, Arias & Smith 1998; Absil, Mahony & Sepulchre 2008).
+- Cited in the text: [1, 2, 4, 5] (introduction), [11–14] (Grassmann/Plücker background), [6, 9] (datasets).
+  [3], [7], [8] and [10] are never cited.
+- **Related Work (§7.1–7.4) cites nothing.** No efficient-attention, state-space, Hyena, geometric deep learning
+  or attention-interpretability papers are referenced. No reference contains any experiment on Grassmann
+  features in sequence models, so the empirical claims rest only on the paper's own tables.
+
+### Measured speed (200-step checks, user's Colab)
+
+| mixer | A100 tok/s | L4 tok/s |
+|---|---|---|
+| grassmann | 37,832 | 8,778 |
+| sym | 40,676 | 8,818 |
+| outer | 69,249 | 16,405 |
+| concat | 74,727 | 16,261 |
+| hyena | 143,736 | 23,839 |
+| swa | 186,352 | 23,993 |
+| attention | 207,660 | 23,839 |
+
+- Full protocol: ~9 h on the A100, ~43 h on the L4.
+- On the L4, hyena, swa and attention run at the same speed, so the time goes to a part all models share
+  (unprofiled).
+- `grassmann` and `sym` are ~2× slower than `outer`, which has about the same feature count. The upper-triangle
+  gather is the likely cause.
+
+### Pilot
+
+`notebooks/pilot_l4.ipynb`: 5 models × 2 seeds × 5 epochs, validation only, ~2.5 h on the L4. It is recorded in
+PROTOCOL.md as an exploratory addition that changes none of the confirmatory rules.
