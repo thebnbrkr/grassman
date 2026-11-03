@@ -63,9 +63,9 @@ if RESTORE:
 
 TRAIN_HELPER = code("""
 # Run every model of this notebook on the same GPU type: precision differs (bf16 on A100/L4, fp16 on T4).
-# COMPILE = True uses torch.compile for every model (fair across models); turn it on only if speed.ipynb
-# showed compiled runs are faster on this GPU, since compiling costs time per run.
-COMPILE = False
+# torch.compile for every model (fair across models): ~2x faster for the pair models on both the A100 and
+# the T4 in speed.ipynb, for 25-60 s of compiling per run.
+COMPILE = True
 
 def train(mixer, seed, epochs=5, lr=1e-3, attn='', save=None, tag='pilot'):
     cmd = [sys.executable, '-m', 'grassman.train', '--mixer', mixer, '--seed', str(seed), '--lr', str(lr),
