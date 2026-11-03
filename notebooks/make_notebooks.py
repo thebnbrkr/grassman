@@ -6,8 +6,9 @@ speed.ipynb            fast vs paper-order Grassmann: same numbers? how much fas
 choose_vs_reach.ipynb  is the gap to attention about choosing which token, or about reach?
 hybrid.ipynb           how much of the gap does one attention layer recover?
 readouts.ipynb         are the edge choices readable, used, and meaningful?
+grassman_colab.ipynb   the full protocol (PROTOCOL.md): sweep, 3 seeds x 30 epochs, test set, bootstrap
 
-All are validation-only (--no-test) and save results under /content/results.
+All but the full protocol are validation-only (--no-test); all save results under /content/results.
 """
 import json
 from pathlib import Path
@@ -67,10 +68,11 @@ TRAIN_HELPER = code("""
 # the T4 in speed.ipynb, for 25-60 s of compiling per run.
 COMPILE = True
 
-def train(mixer, seed, epochs=5, lr=1e-3, attn='', save=None, tag='pilot'):
+def train(mixer, seed, epochs=5, lr=1e-3, attn='', save=None, tag='pilot', test=False, extra=()):
     cmd = [sys.executable, '-m', 'grassman.train', '--mixer', mixer, '--seed', str(seed), '--lr', str(lr),
-           '--epochs', str(epochs), '--tag', tag, '--data-dir', DATA, '--out', RUNS,
-           '--skip-existing', '--no-test']
+           '--epochs', str(epochs), '--tag', tag, '--data-dir', DATA, '--out', RUNS, '--skip-existing', *extra]
+    if not test:
+        cmd += ['--no-test']             # pilots and the LR sweep never evaluate the test set
     if attn:
         cmd += ['--attn-layers', attn]
     if save:
@@ -421,6 +423,92 @@ for s, m in models.items():
             *DOWNLOAD]
 
 
+def protocol():
+    return [md("""
+# Full protocol: does the Grassmann geometry matter?
+
+The confirmatory experiment from `PROTOCOL.md`, fixed before any run: 30 epochs (the paper's length), 3 seeds, learning rate chosen per model on validation, **test set used once**, paired cluster bootstrap over test articles, Holm-corrected confirmatory comparisons. The pilots so far were 5 epochs, validation only.
+
+| model | role | what it is |
+|---|---|---|
+| `grassmann` | confirmatory | the paper's layer: Plücker features of (t, t−Δ), Δ ∈ {1,2,4,8,12,16}, equal-weight average |
+| `sym`, `outer`, `concat` | confirmatory | same layer, other pair features, same ~496-feature budget |
+| `attention` | confirmatory | full causal attention (the transformer) |
+| `concat32` | exploratory | concat at r = 32 (64 features) |
+| `g-select` | exploratory (added after pilots) | `grassmann` with learned weights over its 6 offsets |
+| `hyena` | exploratory | Hyena operator, 16-step explicit filter |
+| `hyena+attn@5` | exploratory (added after pilots) | hyena with layer 6 as full attention |
+| `swa` | exploratory | attention over the last 16 tokens |
+| `grassmann-raw` | exploratory | `grassmann` without L2-normalising the Plücker vector |
+
+**Run the whole notebook on one GPU type, ideally an A100** (precision differs: bf16 on A100/L4, fp16 on T4). Estimated time on an A100: ~1 h sweep + ~3 h main runs (estimate from the pilot speeds).
+
+Results go to `/content/results`. Finished runs are skipped, so after a disconnect re-run the cells; if the runtime was deleted, set `RESTORE = True` and upload the last `results.zip`. Download with the last cell.
+"""),
+            *setup("runs.jsonl"),
+            TRAIN_HELPER,
+            code("""
+CONFIGS = [('grassmann', ''), ('sym', ''), ('outer', ''), ('concat', ''), ('concat32', ''), ('g-select', ''),
+           ('hyena', ''), ('hyena', '5'), ('swa', ''), ('attention', '')]
+name = lambda m, attn: m + (f'+attn@{attn}' if attn else '')
+"""),
+            md("""
+## Stage 1: learning-rate sweep (validation only)
+
+Each model tries 3 learning rates for 10 epochs (seed 0). The best is chosen on **validation** perplexity; these runs never evaluate the test set (`--no-test`).
+"""),
+            code("""
+LRS = [3e-4, 1e-3, 3e-3]
+for m, attn in CONFIGS:
+    for lr in LRS:
+        train(m, 0, epochs=10, lr=lr, attn=attn, tag='sweep')
+best = json.loads(subprocess.check_output(
+    [sys.executable, '-m', 'grassman.analyze', RUNS, '--tag', 'sweep', '--best-lr'], cwd=REPO, text=True))
+print('best learning rate per model:', best)
+!python -m grassman.analyze {RUNS} --tag sweep --val
+"""),
+            md("""
+## Stage 2: main runs (3 seeds × 30 epochs, test set at the best-validation epoch)
+
+The number of seeds is fixed by `PROTOCOL.md`; do not add seeds after looking at results.
+"""),
+            code("""
+SEEDS, EPOCHS = [0, 1, 2], 30
+for seed in SEEDS:                       # seed-major: an interruption still leaves complete seeds
+    for m, attn in CONFIGS:
+        train(m, seed, epochs=EPOCHS, lr=best[name(m, attn)], attn=attn, tag='main', test=True)
+    train('grassmann', seed, epochs=EPOCHS, lr=best['grassmann'], tag='main', test=True, extra=['--no-normalize'])
+"""),
+            md("## Results"),
+            code("!python -m grassman.analyze {RUNS} --tag main"),
+            code("""
+import matplotlib.pyplot as plt
+from collections import defaultdict
+from grassman import analyze
+curves = defaultdict(list)
+for r in analyze.load(RUNS, 'main'):
+    curves[analyze.name(r)].append([h['val_ppl'] for h in r['history']])
+fig, ax = plt.subplots(figsize=(8, 5))
+for n, runs in sorted(curves.items()):
+    k = min(map(len, runs))
+    ax.plot(range(1, k + 1), [sum(c[i] for c in runs) / len(runs) for i in range(k)], label=f'{n} ({len(runs)} seeds)')
+ax.set_xlabel('epoch'); ax.set_ylabel('validation perplexity (mean over seeds)'); ax.set_ylim(top=500)
+ax.grid(alpha=0.3); ax.legend(fontsize=8)
+plt.savefig(f'{OUTDIR}/main_val_curves.png', dpi=150, bbox_inches='tight'); plt.show()
+"""),
+            md("""
+## How to read the results (decision rules from `PROTOCOL.md`)
+
+- **Main table:** validation and test perplexity, mean ± 95% interval over the 3 seeds; the gap to `attention`; speed.
+- **Confirmatory table** (`sym`, `outer`, `concat`, `attention` vs `grassmann`): test-perplexity difference with a 95% cluster-bootstrap interval over test articles, p-value, Holm-adjusted p-value, and how many seeds `grassmann` wins.
+  - **"The geometry matters"** only if `sym`, `outer` and `concat` are all worse with Holm p < 0.05 **and** `grassmann` wins 3/3 seeds. Otherwise: not shown, and we report the size of the difference.
+  - **Reproduction check:** the gap to `attention`, against the paper's 10–15% and the reproduction's 22.6%.
+- **Exploratory table:** everything else (`g-select`, `hyena`, `hyena+attn@5`, `swa`, `concat32`, `grassmann-raw`), reported but not used for claims.
+- **Breakdowns:** perplexity on tokens 0–15 of each block (every model has the same context there) vs 16–127, and on common vs rare target tokens.
+"""),
+            *DOWNLOAD]
+
+
 def write(name, cells):
     nb = {"cells": cells, "metadata": {"accelerator": "GPU", "colab": {"gpuType": "A100", "provenance": []},
           "kernelspec": {"display_name": "Python 3", "name": "python3"}, "language_info": {"name": "python"}},
@@ -434,3 +522,4 @@ if __name__ == "__main__":
     write("choose_vs_reach.ipynb", choose_vs_reach())
     write("hybrid.ipynb", hybrid())
     write("readouts.ipynb", readouts())
+    write("grassman_colab.ipynb", protocol())

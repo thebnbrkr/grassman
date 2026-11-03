@@ -103,3 +103,11 @@ are reported but not used for claims.
 - **2026-11-03: follow-up notebooks added.** `choose_vs_reach`, `hybrid`, `readouts` and `speed`. All are
   exploratory and validation only (`--no-test`), with new model names (`g-select`, `g-dilated`, `g-both`,
   `g-both-angle`, `+attn@k` hybrids). None is part of the confirmatory family. They were designed after the pilot.
+- **2026-11-03: before the full run.**
+  - The full-protocol notebook now compiles every model (`torch.compile`). This does not change results: the
+    choose-vs-reach and hybrid runs reproduced the pilot's grassmann and attention perplexities to within 0.5.
+  - Two **exploratory** models were added, **chosen after seeing the 5-epoch validation pilots**:
+    - `g-select` (choosing closed ~78% of the gap at 5 epochs);
+    - `hyena+attn@5` (best pilot model).
+  - Both get the same LR sweep. Neither is in the confirmatory family, and no confirmatory rule changes.
+  - The smoke-speed stage was dropped (speed is measured in `speed.ipynb`).
