@@ -1,0 +1,5 @@
+torch>=2.1
+numpy
+datasets>=2.14
+transformers>=4.30
+pytest
