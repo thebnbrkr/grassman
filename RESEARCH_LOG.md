@@ -464,3 +464,50 @@ Training tok/s, bf16, batch 32 × 128, random tokens. "paper" = the paper's orde
   - anything about quality (pilot: 26% behind attention; Plücker no better than concat);
   - the linear-scaling advantage, which only matters at long sequences (not tested);
   - a comparison with *compiled* attention (not yet measured).
+
+---
+
+## 2026-11-03 (later): Choose vs reach — results (A100, commit 53dd11a, compiled, bf16, 2 seeds × 5 epochs)
+
+| model | seed 0 | seed 1 | mean | vs grassmann | vs attention |
+|---|---|---|---|---|---|
+| grassmann (equal weights, offsets 1–16) | 269.9 | 270.4 | 270.2 | — | +35.0% |
+| g-dilated (equal weights, offsets to 127) | 258.2 | 258.3 | 258.3 | −4.4% | +29.0% |
+| g-select (learned weights, offsets 1–16) | 215.6 | 216.2 | **215.9** | **−20.1%** | **+7.8%** |
+| g-both (learned weights, offsets to 127) | 217.4 | 218.8 | 218.1 | −19.3% | +8.9% |
+| swa (attention over the last 16) | 202.0 | 203.9 | 202.9 | −24.9% | +1.3% |
+| attention (all 128) | 200.8 | 199.6 | 200.2 | −25.9% | — |
+
+Best epoch 5 for every run, and every model still improving. Seed spread 0.1–1.9.
+
+### What it shows
+
+- **The gap to attention is about choosing, not reach.**
+  - Learned edge weights over the same 6 offsets close **78%** of grassmann's gap to attention
+    ((270.2 − 215.9) / (270.2 − 200.2)), at linear cost.
+  - Extending reach to 127 with equal weights gives only 4.4%.
+  - With selection already present, the long edges add nothing: g-both is 1.0% *worse* than g-select. The dilated
+    set swaps offsets 8 and 12 for 64 and 127.
+- **Reach beyond 16 tokens barely matters at this scale.** swa (16 tokens back) is within 1.3% of full attention.
+- **The remaining g-select vs swa gap (6.4%)** differs in candidate count (6 offsets vs 17 positions), multiple
+  heads, scoring (GATv2 on r = 32 vs dot products), and the message (a wedge with the weighted past vs values in
+  full d). Untested which matters.
+- **Sanity check:** grassmann 270.2 and attention 200.2 reproduce the pilot (269.9 and 200.1) after the speed
+  rewrite, compile and padded head, so the speed changes did not change results.
+
+### Prediction check (written before running)
+
+**Wrong.** I predicted that choosing alone and reach alone would each help "a little", that both together would
+help most, and that g-both would close 20–40% of the gap. In fact choosing alone closed ~78%, reach helped little,
+and both together was no better than choosing.
+
+### Notes
+
+- tok/s for seed 0 includes compile time; seed 1 reused the compile cache, so it is faster (e.g. grassmann 98k vs
+  214k).
+- Per run: 0.7–2.4 min on the A100.
+
+### Open questions this raises
+
+1. Once the layer chooses, does the Plücker message still matter? Compare g-select with concat32 + selection.
+2. Does the remaining 6% come from candidate count? Compare g-select over all 16 offsets 1–16.
