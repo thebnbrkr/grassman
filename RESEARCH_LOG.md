@@ -395,3 +395,34 @@ model.
 
 **Caveat:** fp16 (T4) and bf16 (A100) runs are not directly comparable. Each notebook's models must run on one
 GPU type.
+
+---
+
+## 2026-11-03 (later): A100 speed after the three changes (results (8).zip, speed.json)
+
+Training tok/s, bf16, batch 32 × 128, random tokens. "paper" = the paper's order, eager.
+
+| model | eager | compiled (compile s) | paper | eager / paper | compiled / paper |
+|---|---|---|---|---|---|
+| grassmann | 131,333 | 273,504 (36) | 48,426 | 2.71× | **5.65×** |
+| sym | 118,083 | 261,242 (30) | 50,293 | 2.35× | 5.19× |
+| outer | 135,971 | 283,433 (24) | 73,221 | 1.86× | 3.87× |
+| concat | 139,436 | 271,798 (26) | 77,193 | 1.81× | 3.52× |
+| concat32 | 135,883 | 263,189 (24) | 76,711 | 1.77× | 3.43× |
+| g-select | 100,555 | 197,661 (34) | — | | |
+| g-dilated | 129,039 | 256,049 (24) | 56,757 | 2.27× | 4.51× |
+| g-both | 95,812 | 212,810 (31) | — | | |
+| g-both-angle | 81,612 | 83,653 (1) | — | | |
+| hyena | 212,839 | 209,012 (0) | — | | |
+| swa | 253,400 | 242,873 (0) | — | | |
+| attention | 263,281 | 251,139 (0) | — | | |
+
+- **Eager `grassmann` doubled** from the one-pair version (63.6k → 131k): batching the offsets removed the
+  launch bottleneck.
+- **Compiled `grassmann` (273k) now matches eager attention (263k).**
+- **Measurement bug:** the last four "compiled" numbers (g-both-angle, hyena, swa, attention) show 0–1 s compile
+  time and eager-level speed. Dynamo's recompile limit (8 graphs for `LM.forward`) was reached after the first
+  eight models, so these ran eager. Their compiled speed is **not measured**.
+  - Fixed: `throughput` now calls `torch._dynamo.reset()` before compiling.
+  - Training runs are separate processes and are not affected.
+- The equivalence (section 1), profile and matmul outputs are not in the zip; to check from the notebook.

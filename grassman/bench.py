@@ -24,6 +24,10 @@ def throughput(cfg: Config, device: torch.device, steps: int = 50, warmup: int =
     torch.manual_seed(0)
     model = LM(cfg).to(device)
     set_reference(model, reference)
+    if compile:
+        # Each model is a new LM.forward graph; without a reset, dynamo stops
+        # compiling after its recompile limit (8) and silently runs eager.
+        torch._dynamo.reset()
     fwd = torch.compile(model) if compile else model
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     amp = pick_amp(device)
