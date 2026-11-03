@@ -23,12 +23,10 @@ bert-base-uncased WordPiece, block 128, batch 32, 30 epochs. All models are with
 
 ## Run it
 
-Open `notebooks/grassman_colab.ipynb` in Colab with an L4 GPU and run the cells in order. It runs the tests, builds
-the data, measures speed, sweeps the learning rate per mixer (1 seed), runs 3 seeds at each mixer's best LR, and
-prints a table with 95% confidence intervals and paired same-seed differences. Results go to Google Drive and
-finished runs are skipped on re-run.
-
-To get the code into Colab, either push this repo to GitHub and set `REPO_URL`, or upload `grassman.zip`.
+Open `notebooks/grassman_colab.ipynb` in Colab with an L4 GPU and run the cells in order. It clones this repo,
+runs the tests, builds the data, measures speed, sweeps the learning rate per mixer (1 seed, test set untouched),
+runs 3 seeds at each mixer's best LR and prints the results described in [PROTOCOL.md](PROTOCOL.md). Results are
+saved under `/content/results`; finished runs are skipped on re-run, and the last cell downloads them.
 
 Locally (CPU or CUDA):
 
@@ -53,6 +51,19 @@ Training on Apple MPS currently fails at `torch.autocast` (PyTorch 2.4); use Col
 - **No test-set selection.** Test perplexity is read at the epoch with the best validation perplexity.
 - **Seeds and paired comparisons.** 3 seeds per mixer; differences are computed seed by seed.
 
+## Evaluation
+
+The protocol in [PROTOCOL.md](PROTOCOL.md) was fixed before any run. In short:
+
+- every choice (learning rate, reported epoch) is made on validation; the LR sweep never evaluates the test set;
+- training noise: mean and 95% t-interval over 3 seeds, plus per-seed wins;
+- test-set sampling: paired cluster bootstrap over test articles (10,000 resamples, same resamples for both
+  systems), two-sided p-values;
+- four comparisons are declared confirmatory and Holm-corrected (`grassmann` vs `sym`, `outer`, `concat`,
+  `attention`); everything else is exploratory;
+- breakdowns by position in the block (inside or beyond the 16-token window) and by target-token frequency;
+- known limitations are listed in advance.
+
 ## Things to know about the paper
 
 - Its equations pair position t with **t+Δ**, a future token, which would leak the answer in next-token
@@ -64,14 +75,17 @@ Training on Apple MPS currently fails at `torch.autocast` (PyTorch 2.4); use Col
 
 ## Tests
 
-`python -m pytest -q`: 84 tests in about 45 s on CPU. They cover:
+`python -m pytest -q`: 92 tests in about 50 s on CPU. They cover:
 
 - **Plücker maths:** the definition, equality with the cross product in 3-D, sign flip under swap, zero for
   parallel vectors, scaling by det(M) within the plane.
 - **Every mixer:** no future leak, exact reach, gradients reach every parameter, short sequences, zero pairs.
 - **Full model:** causality, determinism, initial loss ≈ log(vocab), can memorise a batch, parameter matching.
-- **Training and analysis:** block shifting, LR schedule, perplexity of a uniform model, a complete record from a
-  2-epoch run, exact reproducibility by seed, skip-existing, CI maths, best-LR selection.
+- **Training and analysis:** article boundaries, block shifting, LR schedule, perplexity of a uniform model, a
+  complete record from a 2-epoch run (per-article, per-position and per-frequency numbers agree with the overall
+  perplexity), `--no-test` never touching the test set, exact reproducibility by seed, skip-existing, CI and Holm
+  maths, the bootstrap (zero for identical systems, detects a known difference with the right sign, pairs only
+  shared seeds), best-LR selection.
 
 Planted bugs (pairing with the future, the wrong Plücker sign, an off-by-one attention window) each make a test
 fail.
@@ -85,5 +99,6 @@ grassman/data.py     Wikitext-2 download, tokenisation, blocks
 grassman/train.py    one run -> one JSON line
 grassman/analyze.py  tables, CIs, paired differences, best LR
 notebooks/           the Colab notebook
+PROTOCOL.md          evaluation protocol, fixed before any run
 RESEARCH_LOG.md      what we tried and what happened
 ```

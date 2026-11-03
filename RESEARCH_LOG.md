@@ -42,3 +42,27 @@ where this path is not taken.
   `grassmann`, the geometry matters at this scale. If not, it doesn't.
 - `grassmann` vs `attention`: check the gap against the paper (10–15%) and the reproduction (22.6%).
 - Next, if the geometry matters: the synthetic recall and bracket tasks, then larger models and the Hyena hybrid.
+
+---
+
+## 2026-11-03 (later): Evaluation brought up to the IWCLUL 2026 ASR paper's standard
+
+**Status:** still no real training run.
+
+### Why
+
+The user's Hungarian ASR submission (IWCLUL 2026) set the bar: choices on dev only, a declared confirmatory family
+with Holm correction, a cluster bootstrap with paired resamples, explicit seed-noise reporting, error breakdowns,
+and limitations and test-informed decisions disclosed.
+
+### What changed
+
+- `PROTOCOL.md`, committed before any result: questions, selection rule, confirmatory family (`grassmann` vs `sym`,
+  `outer`, `concat`, `attention`), decision rules, known limitations.
+- The LR sweep runs with `--no-test`, so the test set is never evaluated during selection.
+- Every main run stores per-article test NLL (Wikitext-2 article boundaries are the clusters), NLL by position in
+  the block, and NLL by target-token frequency.
+- `analyze.py`: paired cluster bootstrap (10,000 resamples), Holm-corrected confirmatory table, exploratory table,
+  per-seed wins, position and frequency breakdowns.
+- The notebook clones from GitHub and saves results under `/content/results`, with no Google Drive.
+- 92 tests pass on CPU.
