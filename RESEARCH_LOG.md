@@ -138,3 +138,55 @@ and limitations and test-informed decisions disclosed.
 
 `notebooks/pilot_l4.ipynb`: 5 models × 2 seeds × 5 epochs, validation only, ~2.5 h on the L4. It is recorded in
 PROTOCOL.md as an exploratory addition that changes none of the confirmatory rules.
+
+---
+
+## 2026-11-03 (later): Pilot results
+
+**Status:** pilot finished. Validation only, 5 epochs, so these are exploratory, not confirmatory.
+
+### What ran
+
+`notebooks/pilot_l4.ipynb`, but on an **A100** (the notebook's GPU check shows A100-SXM4-80GB), commit `3c8a1ea`.
+5 models × 2 seeds × 5 epochs, LR 1e-3 for all. Total ~38 min. The test set was never evaluated.
+
+### Results (best validation perplexity; the best epoch was 5 for every run)
+
+| mixer | seed 0 | seed 1 | vs grassmann |
+|---|---|---|---|
+| concat (r = 248) | 268.0 | 269.1 | −0.5% |
+| grassmann (Plücker) | 269.9 | 269.8 | — |
+| outer | 271.8 | 271.7 | +0.7% |
+| sym | 280.2 | 280.2 | +3.8% |
+| attention | 199.1 | 201.1 | −25.9% |
+
+The seed spread is 0.0–1.1 perplexity for the pair mixers and 2.0 for attention. The seeds differ at epoch 1
+(e.g. grassmann 467.9 vs 461.0) and converge by epoch 5.
+
+### What it suggests
+
+- **The Plücker geometry does not beat plain concatenation.** Under the protocol's decision rule, "the geometry
+  matters" would fail.
+- **Order is what matters.** `sym`, the only variant that cannot tell the two tokens apart, is the only clearly
+  worse one. Antisymmetry helps relative to `sym` because it encodes order, which `concat` and `outer` also do.
+- **Attention is ~26% better at 5 epochs.** The paper says 11%, Arledge 22.6%, Norman 43%.
+- **The paper's transformer baseline looks weak.** With the same data, tokenizer and size, our attention reaches
+  200 validation perplexity after 5 epochs, against the paper's 248.4 after 30 (Norman's: 248.7). Our Grassmann
+  reaches 269.9 against the paper's 275.7. Our Grassmann roughly matches theirs; our transformer is ~20% better.
+  Likely causes: pre-LN, weight decay 0.1, warm-up and cosine schedule. Unconfirmed until the 30-epoch runs.
+
+### Caveats
+
+- 5 epochs, and every model is still improving, so the ranking could change at 30 epochs.
+- `concat` keeps 248 numbers per token and is 2.6% larger, so its result mixes "no geometry" with "less
+  compression". `concat32` (r = 32) has been added to separate the two (PROTOCOL.md change log).
+
+### What worked and what didn't
+
+- **Worked:** the pilot design (cheap, validation only, protocol intact), seed consistency, and the tests (all
+  passed on Colab: 92 at that commit).
+- **Didn't:**
+  - The L4 is ~5× slower than the A100, with a shared bottleneck that hasn't been profiled.
+  - `grassmann` and `sym` are ~2× slower than `outer` because of the upper-triangle gather.
+  - Our block is pre-LN with two residual paths, not the paper's post-LN block. That is fine for Q1 but open
+    for Q2.

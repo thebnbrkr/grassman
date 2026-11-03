@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from grassman.model import LM, MIXERS, Config
+from grassman.model import LM, MIXERS, UNMATCHED, Config
 
 TINY = dict(vocab_size=101, block_size=32, d=32, d_ff=128, n_layers=2, n_heads=4)
 
@@ -64,8 +64,18 @@ def test_head_is_tied_to_embedding():
 def test_paper_scale_parameter_counts_match():
     """At the paper's 6-layer size every variant is within 3% of the
     attention baseline, which itself matches the paper's 12.59M."""
-    counts = {m: LM(Config(mixer=m)).n_params() for m in MIXERS}
+    counts = {m: LM(Config(mixer=m)).n_params() for m in MIXERS if m not in UNMATCHED}
     ref = counts["attention"]
     assert abs(ref / 1e6 - 12.59) < 0.05, ref
     for m, n in counts.items():
         assert abs(n / ref - 1) < 0.03, (m, n, ref)
+
+
+def test_concat32_keeps_the_papers_token_compression():
+    """concat32 reduces tokens to r = 32 like grassmann, so it sees 64 pair
+    features instead of ~496, and is smaller than the matched models."""
+    from grassman.mixers import pair_dim
+    m = LM(Config(mixer="concat32")).blocks[0].mixer
+    g = LM(Config(mixer="grassmann")).blocks[0].mixer
+    assert m.r == g.r == 32 and pair_dim(m.kind, m.r) == 64
+    assert LM(Config(mixer="concat32")).n_params() < LM(Config(mixer="attention")).n_params()

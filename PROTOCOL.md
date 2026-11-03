@@ -91,3 +91,9 @@ are reported but not used for claims.
   - Why: to see cheaply on an L4 whether there is any effect before spending ~9 A100-hours (or ~43 L4-hours) on the full runs.
   - The pilot does not change any rule above, and its results are exploratory and not used for claims.
   - It can inform only whether the full run is worth doing, not its settings.
+- **2026-11-03: `concat32` added as an exploratory model.**
+  - What: `concat` at the paper's r = 32, so 64 features per pair and the same token compression as `grassmann`.
+  - **Added after seeing the pilot's validation results** (no test-set numbers existed).
+  - Why: in the pilot `concat` matched `grassmann`, but it keeps 248 numbers per token instead of 32. `concat32`
+    separates "no geometry" from "less compression".
+  - Not part of the confirmatory family, and not parameter-matched (it is smaller). No confirmatory rule changes.

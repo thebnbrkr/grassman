@@ -15,9 +15,14 @@ import torch.nn.functional as F
 
 from .mixers import AttentionMixer, HyenaShortMixer, PairMixer
 
-# mixer name -> PairMixer kind, for the four Grassmann-style variants
-PAIR_MIXERS = {"grassmann": "antisym", "sym": "sym", "outer": "outer", "concat": "concat"}
+# mixer name -> (PairMixer kind, reduced width r; None = the kind's matched-budget default)
+PAIR_MIXERS = {"grassmann": ("antisym", None), "sym": ("sym", None), "outer": ("outer", None),
+               "concat": ("concat", None),
+               # exploratory: concat at the paper's r = 32 (64 features), same token compression as grassmann
+               "concat32": ("concat", 32)}
 MIXERS = (*PAIR_MIXERS, "hyena", "swa", "attention")
+# smaller than the others by design, so excluded from parameter matching
+UNMATCHED = ("concat32",)
 
 
 @dataclass
@@ -39,7 +44,8 @@ class Config:
 
 def make_mixer(cfg: Config) -> nn.Module:
     if cfg.mixer in PAIR_MIXERS:
-        return PairMixer(cfg.d, kind=PAIR_MIXERS[cfg.mixer], windows=cfg.windows,
+        kind, r = PAIR_MIXERS[cfg.mixer]
+        return PairMixer(cfg.d, kind=kind, r=r, windows=cfg.windows,
                          normalize=cfg.normalize, dropout=cfg.dropout)
     reach = max(cfg.windows)
     if cfg.mixer == "hyena":

@@ -5,7 +5,7 @@ Attention-Free Alternative for Sequence Modeling* (Zhang Chong, arXiv 2512.19428
 
 The paper's layer pairs each token with tokens 1–16 steps back and feeds the pair's **Plücker coordinates**
 (the antisymmetric product a_i b_j − a_j b_i) into the model. It never tests whether that geometry is what helps.
-This repo trains seven small language models that differ **only** in the token mixer:
+This repo trains small language models that differ **only** in the token mixer:
 
 | mixer | pair feature / mixing | reach |
 |---|---|---|
@@ -13,6 +13,7 @@ This repo trains seven small language models that differ **only** in the token m
 | `sym` | symmetric product a_i b_j + a_j b_i, r = 31 → 496 | 16 |
 | `outer` | full product a_i b_j, r = 22 → 484 | 16 |
 | `concat` | [a; b], no product, r = 248 → 496 | 16 |
+| `concat32` | [a; b] at the paper's r = 32 → 64 (exploratory, smaller by design) | 16 |
 | `hyena` | order-2 Hyena, explicit 15-tap filter + width-3 short convs | 16 |
 | `swa` | sliding-window attention | 16 |
 | `attention` | full causal attention (baseline) | all |
@@ -80,7 +81,7 @@ The protocol in [PROTOCOL.md](PROTOCOL.md) was fixed before any run. In short:
 
 ## Tests
 
-`python -m pytest -q`: 92 tests in about 50 s on CPU. They cover:
+`python -m pytest -q`: 97 tests in about a minute on CPU. They cover:
 
 - **Plücker maths:** the definition, equality with the cross product in 3-D, sign flip under swap, zero for
   parallel vectors, scaling by det(M) within the plane.

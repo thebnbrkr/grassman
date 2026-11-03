@@ -26,7 +26,7 @@ _T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
         8: 2.306, 9: 2.262, 10: 2.228, 15: 2.131, 20: 2.086, 30: 2.042}
 BASELINE = "grassmann"
 CONFIRMATORY = ("sym", "outer", "concat", "attention")   # fixed in PROTOCOL.md
-ORDER = ("grassmann", "sym", "outer", "concat", "hyena", "swa", "attention")
+ORDER = ("grassmann", "sym", "outer", "concat", "concat32", "hyena", "swa", "attention")
 N_RESAMPLES = 10_000
 LOCAL = 16   # every windowed mixer sees 16 tokens back
 
