@@ -569,3 +569,47 @@ the logged validation perplexity.
   signal. Long edges are unused, matching choose-vs-reach (reach did not help).
 - **Does not show:** that it is *more* readable than attention. The same summaries (distance histogram per head,
   ablation by distance) have not been computed for swa or attention. Also, 5 epochs only.
+
+---
+
+## 2026-11-03 (later): Hybrid — results (A100-SXM4-40GB, commit adbcdb0, bf16, compiled, 2 seeds × 5 epochs)
+
+| model | seed 0 | seed 1 | mean | vs attention |
+|---|---|---|---|---|
+| **hyena+attn@5** | 183.5 | 184.7 | **184.1** | **−8.0%** |
+| **hyena** (local only, 16 back) | 192.5 | 191.8 | **192.1** | **−4.0%** |
+| g-both+attn@5 | 197.4 | 199.4 | 198.4 | −0.9% |
+| attention (all 6 layers) | 200.8 | 199.6 | 200.2 | — |
+| g-both | 217.4 | 218.8 | 218.1 | +8.9% |
+| concat32+attn@2 (attention at layer 3) | 226.2 | 228.3 | 227.3 | +13.5% |
+| grassmann+attn@5 | 244.4 | 244.4 | 244.4 | +22.1% |
+| concat32+attn@5 | 247.3 | 248.2 | 247.7 | +23.7% |
+| grassmann | 269.9 | 270.4 | 270.1 | +34.9% |
+| concat32 | 280.2 | 280.8 | 280.5 | +40.1% |
+
+Best epoch 5 for every run; every model still improving. Seed spread 0.1–2.1. grassmann (270.1), g-both (218.1) and
+attention (200.2) reproduce the earlier notebooks.
+
+### What it shows
+
+- **Short Hyena beats full attention at this budget,** by 4% alone and by 8% with one attention layer, in both
+  seeds. It sees only 16 tokens back. **This is the strongest model so far.** It is also the first result that
+  bears on Hyena-audio (a separate project and log): a 16-step explicit Hyena filter with gating is a strong local
+  mixer here. Caveat: 5 epochs, with every model still improving. Attention may catch up or overfit differently by
+  30 epochs; the full protocol run includes hyena, swa and attention on the test set.
+- **One attention layer at the end recovers only ~40%** of the gap for weak local mixers (grassmann 37%, concat32
+  41%). **Placing it in the middle recovers more:** concat32 with attention at layer 3 is 227.3, against 247.7 at
+  layer 6 (8% better).
+- **g-both + one attention layer ≈ full attention** (198.4 vs 200.2).
+- **At equal token compression (r = 32), Plücker beats concat by 3.8%** (grassmann 270.1 vs concat32 280.5). But
+  concat32 hands the projection 64 numbers per pair against 496, and concat at r = 248 (496 numbers) matched
+  grassmann in the pilot. So the product mainly gets many features out of a small r, not special geometry. Untested
+  directly.
+
+### Prediction check
+
+**Mostly wrong.**
+- "One attention layer recovers ≥ 60%": 37–41% at layer 6, 66% at layer 3, and 110% for g-both.
+- "The local mixer type matters little inside a hybrid (≤ 3%)": hybrids range from 184 to 248.
+- "Layer 3 vs 6 is a small difference": 8%.
+- Hyena beating attention was not predicted.
