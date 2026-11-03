@@ -40,12 +40,14 @@ else:
 !git log --oneline -1
 !pip install -q datasets transformers
 """),
-        md("Optional: upload an earlier `results.zip` so finished runs are skipped (cancel to start fresh)."),
+        md("Only if you are **resuming this notebook** in a new runtime: set `RESTORE = True` to upload the "
+           "`results.zip` it downloaded earlier, so finished runs are skipped. On a first run leave it `False`."),
         code("""
-from google.colab import files
-up = files.upload()
-for name in up:
-    !cd /content && unzip -o -q "{name}"
+RESTORE = False
+if RESTORE:
+    from google.colab import files
+    for name in files.upload():
+        !cd /content && unzip -o -q "{name}"
 !ls -la {OUTDIR}
 """),
         md("Unit tests (about a minute). Stop if anything fails."),
