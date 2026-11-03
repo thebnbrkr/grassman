@@ -511,3 +511,61 @@ and both together was no better than choosing.
 
 1. Once the layer chooses, does the Plücker message still matter? Compare g-select with concat32 + selection.
 2. Does the remaining 6% come from candidate count? Compare g-select over all 16 offsets 1–16.
+
+---
+
+## 2026-11-03 (later): Readouts — results (g-both-angle, NVIDIA L4, bf16, compiled, 2 seeds × 5 epochs)
+
+**Perplexity:** 217.37 / 218.83, against g-both without the angle 217.40 / 218.85 (A100). Same seed, same initial
+weights, and the angle weight starts at 0. **The angle changes perplexity by ~0.01%.** The saved weights reproduce
+the logged validation perplexity.
+
+### 1. Readable — edge share per layer (positions where all edges exist)
+
+| layer | seed | t−1 | t−2 | t−4 | t−16 | t−64 | t−127 | top weight |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 0 / 1 | 0.59 / 0.62 | 0.15 / 0.14 | 0.07 / 0.06 | 0.06 / 0.06 | 0.06 / 0.06 | 0.08 / 0.06 | 0.59 / 0.62 |
+| 1 | 0 / 1 | 0.54 / 0.55 | 0.15 / 0.19 | 0.11 / 0.08 | 0.08 / 0.05 | 0.06 / 0.05 | 0.05 / 0.08 | 0.56 / 0.56 |
+| 2 | 0 / 1 | 0.54 / 0.44 | 0.21 / 0.19 | 0.09 / 0.17 | 0.05 / 0.07 | 0.04 / 0.05 | 0.07 / 0.07 | 0.54 / 0.47 |
+| 3 | 0 / 1 | 0.38 / 0.29 | 0.27 / 0.14 | 0.21 / 0.21 | 0.05 / 0.19 | 0.04 / 0.10 | 0.05 / 0.08 | 0.45 / 0.33 |
+| 4 | 0 / 1 | 0.27 / 0.44 | 0.17 / 0.26 | 0.22 / 0.15 | 0.17 / 0.05 | 0.09 / 0.04 | 0.08 / 0.06 | 0.33 / 0.49 |
+| 5 | 0 / 1 | 0.45 / 0.41 | 0.22 / 0.27 | 0.17 / 0.19 | 0.05 / 0.04 | 0.04 / 0.04 | 0.06 / 0.06 | 0.48 / 0.44 |
+
+- **Seed agreement** (correlation of shares) per layer: 1.00, 0.99, 0.97, 0.75, 0.79, 0.98.
+- **Layers 3 and 4 swap roles between seeds.** Seed 0's layer 4 (0.27/0.17/0.22/0.17/0.09/0.08) matches seed 1's
+  layer 3 (0.29/0.14/0.21/0.19/0.10/0.08), and seed 0's layer 3 matches seed 1's layer 4. The same two jobs appear
+  in both seeds, in a different layer order: a "local" job (t−1, t−2, t−4) and a "wider" job (which also uses
+  t−16).
+- Top weights are 0.33–0.62, against 0.17 for no preference.
+- Long edges (t−64, t−127) get 4–10%.
+
+### 2. Used — removing one edge (Δ mean NLL in nats, first 300 validation blocks)
+
+- **t−1:** layer 0 +0.194 / +0.165 (≈ +18–21% perplexity), layer 1 +0.097 / +0.115, layer 2 +0.076 / +0.038,
+  later layers +0.007 to +0.029.
+- **t−16** matters only in the "wider" layer: seed 0 layer 4 +0.006, seed 1 layer 3 +0.010.
+- **t−64 and t−127:** ≤ 0.001 everywhere. Removing them changes nothing.
+- The shares predict the ablation effects: high-share edges cost the most when removed.
+
+### 3. Meaningful — sin(angle) between z_t and z_{t−1}, after a sentence end (`.` `!` `?`, n = 8,966) vs elsewhere
+
+- **Higher after a sentence end in all 12 layer × seed cases.** Differences +0.017 to +0.092; for example seed 0
+  layer 1: 0.860 vs 0.772, layer 2: 0.893 vs 0.801.
+- **Learned angle weights have a consistent sign pattern across seeds:** layer 0 positive (+0.41 / +0.36), layers
+  1–5 negative (−0.03 to −0.64); layer 5 strongly negative in both (−0.61 / −0.64).
+- No significance test was run. The baseline sin is already high (0.6–0.92).
+
+### Prediction check
+
+- **Right:** early layers favour t−1 with top weight well above 1/6; patterns broadly similar across seeds;
+  removing t−1 in layer 0 costs most; sin(angle) slightly higher after sentence ends.
+- **Wrong:** "angle weights stay small". Layer 5 is about −0.6 in both seeds. The angle still does not help
+  perplexity.
+
+### What it shows, and what it does not
+
+- **Shows:** the edge-choosing layer can be read from 6 numbers per layer, and the reading is reproducible across
+  seeds, up to layer order. It agrees with causal ablations. Its angle carries a weak but consistent boundary
+  signal. Long edges are unused, matching choose-vs-reach (reach did not help).
+- **Does not show:** that it is *more* readable than attention. The same summaries (distance histogram per head,
+  ablation by distance) have not been computed for swa or attention. Also, 5 epochs only.
