@@ -282,3 +282,39 @@ feature is
 - **Speed:** b̄_t costs six cheap r-dimensional shifted sums, followed by **one** product and one gather per layer.
   Folding the gather into the projection weights removes the slow index backward entirely. Exact; not yet
   implemented.
+
+---
+
+## 2026-11-03 (later): L4 speed results, and the one-pair fast path implemented
+
+### L4 numbers (the same speed notebook, commit ca4b164; the user ran it on both GPUs)
+
+| model | fast | paper order | speed-up |
+|---|---|---|---|
+| grassmann | 15,655 | 8,842 | 1.8× |
+| sym | 14,635 | 8,271 | 1.8× |
+| outer | 17,955 | 14,040 | 1.3× |
+| concat / concat32 | 16,397 / 21,002 | 14,437 / 19,669 | 1.1× |
+| g-dilated | 13,922 | 9,189 | 1.5× |
+| g-select / g-both / g-both-angle | 12,877 / 13,460 / 13,143 | — | — |
+| hyena / swa / attention | 20,777 / 20,739 / 20,564 | — | — |
+
+- **The L4 slowdown is the matrix multiplies.** In the attention profile, `aten::mm` is 65.8% of GPU time and every
+  linear layer (25 per step, 3 kernels each) runs `magma_sgemmEx_kernel<float, __nv_bfloat16, ...>`, at about 2 ms
+  per call whatever the shape. That is a fallback kernel; the tensor cores are not being used.
+- Attention is 14× slower than on the A100 (20.6k vs 288k tok/s), where spec sheets suggest ~2.6×. Every non-pair
+  model hits the same ceiling (~20.6k).
+- The cause (library choice, vocabulary alignment of 30,522, precision, or a throttled GPU) is not known yet.
+  `speed.ipynb` section 4 now times plain matmuls by precision (bf16/fp16/fp32/TF32), BLAS library (cuBLAS vs
+  cuBLASLt), and padded vs unpadded vocabulary, and prints clocks and power.
+
+### One-pair fast path (implemented)
+
+- PairMixer now builds b_t = Σ_Δ s_Δ z_{t−Δ} (s_Δ = edge weight / ‖pair‖) and **one** pair (z_t, b_t) per token.
+  For concat, the first half is z_t · Σ_Δ s_Δ.
+- The upper-triangle selection is folded into the projection weights (`_folded_weight`, an index_add on the
+  d × 496 weight). The per-token gather is gone; the folded projection runs in fp32 to keep the a_i b_j − a_j b_i
+  cancellation exact.
+- It equals the paper's order in float64 for all kinds, offset sets and lengths (outputs and gradients).
+  Two planted bugs were each caught: the folded sign failed 14 tests, the concat scale 7. 187 tests pass.
+- Speed is not measured yet. Re-run `speed.ipynb`.

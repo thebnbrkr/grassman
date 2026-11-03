@@ -98,11 +98,12 @@ def speed():
     return [md("""
 # Speed: the fast Grassmann layer
 
-The paper projects each offset's 496 Plücker numbers to 256 and then averages the six results. Projecting and averaging are both linear, so this notebook's code averages first and projects once. It also builds the average from the 32×32 pair products, so the slow upper-triangle lookup happens once instead of six times, and it takes the normaliser from Lagrange's identity, ‖a∧b‖² = ‖a‖²‖b‖² − (a·b)². Same maths, fewer operations.
+The paper projects each offset's 496 Plücker numbers to 256 and then averages the six results. Every pair shares the current token z_t, and the Plücker map is linear in its second vector, so the average equals **one** pair: z_t with a weighted average of its past window (the weights include the normaliser, from Lagrange's identity ‖a∧b‖² = ‖a‖²‖b‖² − (a·b)²). The fast path builds that one pair per token and folds the upper-triangle selection into the projection weights, so there is no slow per-token lookup. Same maths, far fewer operations.
 
 1. **Same numbers?** Fast path vs the paper's order on this GPU, in float32: outputs and every gradient.
 2. **How much faster?** Training tokens/s for each model, fast vs paper order.
-3. **Where does the time go?** A profile of a few training steps, to explain the shared slowdown on the L4.
+3. **Where does the time go?** A profile of a few training steps.
+4. **Are matrix multiplies using tensor cores?** Plain matmul speed at this model's shapes, by precision and BLAS library. On the L4 the profile showed every matmul on a slow fallback kernel (`magma_sgemmEx`); this finds which setting fixes it.
 
 No data download is needed: speed is measured on random tokens. About 5 minutes on an A100.
 """),
@@ -151,6 +152,54 @@ for m in ['attention', 'grassmann']:
         torch.cuda.synchronize()
     print(f'===== {m} =====')
     print(prof.key_averages().table(sort_by='cuda_time_total', row_limit=15))
+"""),
+            md("""
+## 4. Are matrix multiplies using tensor cores?
+
+Time of one matmul at this model's shapes. For scale, peak dense throughput is roughly 120 TFLOP/s (bf16/fp16) and 30 (fp32) on an L4, and 312 and 19.5 on an A100. A bf16 number near the fp32 one, or far below it, means the tensor cores are not being used. The vocabulary (30,522) is not a multiple of 8, which can block the fast kernels, so a padded version (30,528) is timed too. The clock and power line shows whether the GPU is throttling.
+"""),
+            code("""
+!nvidia-smi --query-gpu=name,clocks.sm,clocks.max.sm,power.draw,power.limit,temperature.gpu --format=csv
+import time
+print('torch', torch.__version__, '| CUDA', torch.version.cuda, '|', torch.cuda.get_device_name())
+try:
+    default_blas = torch.backends.cuda.preferred_blas_library()
+    print('preferred BLAS library:', default_blas)
+except Exception as e:
+    default_blas = None
+    print('preferred_blas_library not available:', e)
+
+def gemm(M, K, N, dtype, iters=20):
+    a = torch.randn(M, K, device=dev, dtype=dtype)
+    b = torch.randn(K, N, device=dev, dtype=dtype)
+    for _ in range(3):
+        a @ b
+    torch.cuda.synchronize(); t = time.time()
+    for _ in range(iters):
+        a @ b
+    torch.cuda.synchronize()
+    ms = (time.time() - t) / iters * 1e3
+    return ms, 2 * M * K * N / (ms / 1e3) / 1e12
+
+SHAPES = {'output layer  4096x256 @ 256x30522': (4096, 256, 30522),
+          'padded vocab  4096x256 @ 256x30528': (4096, 256, 30528),
+          'FFN           4096x256 @ 256x1024': (4096, 256, 1024)}
+PRECISIONS = [('bf16', torch.bfloat16, False), ('fp16', torch.float16, False),
+              ('fp32', torch.float32, False), ('fp32+TF32', torch.float32, True)]
+for lib in ['cublas', 'cublaslt']:
+    try:
+        torch.backends.cuda.preferred_blas_library(lib)
+    except Exception as e:
+        print(f'{lib}: cannot select ({e})'); continue
+    for pname, dtype, tf32 in PRECISIONS:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+        for sname, (M, K, N) in SHAPES.items():
+            ms, tflops = gemm(M, K, N, dtype)
+            print(f'{lib:<9} {pname:<10} {sname}   {ms:7.3f} ms   {tflops:6.1f} TFLOP/s')
+    print()
+torch.backends.cuda.matmul.allow_tf32 = False
+if default_blas is not None:
+    torch.backends.cuda.preferred_blas_library(default_blas)
 """),
             *DOWNLOAD]
 

@@ -20,6 +20,8 @@ as the public reproduction does, and tests/test_mixers.py checks causality.
 """
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -52,6 +54,16 @@ def pair_features(a: torch.Tensor, b: torch.Tensor, kind: str) -> torch.Tensor:
     raise ValueError(f"unknown pair kind {kind!r}")
 
 
+def _wide(x: torch.Tensor) -> torch.Tensor:
+    """bf16/fp16 -> fp32; fp32 and fp64 unchanged (the tests run in fp64)."""
+    return x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+
+
+def _no_autocast(h: torch.Tensor):
+    """Keep the folded projection in fp32 under CUDA autocast."""
+    return torch.autocast("cuda", enabled=False) if h.is_cuda else contextlib.nullcontext()
+
+
 def pair_norm(a: torch.Tensor, b: torch.Tensor, kind: str) -> torch.Tensor:
     """||pair_features(a, b, kind)|| in closed form, without building the features.
     antisym uses Lagrange's identity ||a ^ b||^2 = |a|^2 |b|^2 - (a.b)^2."""
@@ -78,12 +90,19 @@ class PairMixer(nn.Module):
     """Causal Grassmann mixing: reduce, pair t with t-delta for each offset,
     embed the pair, average over offsets, project back, gate against the input.
 
-    The paper projects every offset's pair features and then averages. Both
-    steps are linear, so we average first and project once (6x fewer
-    multiply-adds), build the average from the r x r pair products so the
-    upper-triangle gather happens once instead of once per offset, and take
-    the normaliser from pair_norm. `reference_forward` is the paper's order;
-    tests/test_speed.py checks both give the same output and gradients.
+    The paper projects every offset's pair features and then averages. Every
+    pair shares z_t, and each pair feature is linear in its second vector, so
+
+        sum_delta s_delta * pair(z_t, z_{t-delta}) = pair(z_t, b_t),
+        b_t = sum_delta s_delta * z_{t-delta}
+
+    with s_delta = edge weight / ||pair|| (the normaliser, from pair_norm):
+    the layer is one pair of the current token with a weighted average of its
+    past window (for concat the first half is z_t * sum_delta s_delta). We
+    build that one pair and fold the upper-triangle selection into the
+    projection weights (`_folded_weight`), so there is no per-token gather.
+    `reference_forward` is the paper's order; tests/test_speed.py checks both
+    give the same outputs and gradients.
 
     With select=True the equal-weight average becomes a learned softmax over
     the offsets (a GATv2-style score from [z_t; z_{t-delta}], a per-offset
@@ -114,6 +133,10 @@ class PairMixer(nn.Module):
                 self.angle_weight = nn.Parameter(torch.zeros(1))
         self.record, self.last, self.drop_edge = False, None, None
         self.use_reference = False   # benchmark switch: run the paper's (slow) order of operations
+        if kind in ("antisym", "sym"):
+            i, j = torch.triu_indices(self.r, self.r, offset=1 if kind == "antisym" else 0)
+            self.register_buffer("_ij", i * self.r + j, persistent=False)
+            self.register_buffer("_ji", j * self.r + i, persistent=False)
 
     @property
     def reach(self) -> int:
@@ -143,39 +166,44 @@ class PairMixer(nn.Module):
         scores = torch.where(valid.any(-1)[None, :, None], scores, torch.zeros_like(scores))
         return torch.softmax(scores, dim=-1) * valid
 
-    def _features(self, m: torch.Tensor) -> torch.Tensor:
-        """Pair features of the averaged pair statistic (linear in it)."""
-        if self.kind in ("concat", "outer"):
-            return m.flatten(2)
-        i, j = torch.triu_indices(self.r, self.r, offset=1 if self.kind == "antisym" else 0, device=m.device)
+    def _folded_weight(self) -> torch.Tensor:
+        """proj.weight laid out over the r x r product a b^T, so that
+        proj(pair_features(a, b)) = vec(a b^T) @ W.T + bias with no gather."""
+        W = self.proj.weight
+        if self.kind == "outer":
+            return W
         sign = -1.0 if self.kind == "antisym" else 1.0
-        return m[..., i, j] + sign * m[..., j, i]
+        full = W.new_zeros(W.shape[0], self.r * self.r)
+        return full.index_add(1, self._ij, W).index_add(1, self._ji, sign * W)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         if self.use_reference:
             return self.reference_forward(h)
         B, T, d = h.shape
-        # Pair statistics in fp32: a_i b_j - a_j b_i cancels badly in bf16.
-        z = self.red(h).float()
+        z = _wide(self.red(h))       # a_i b_j - a_j b_i cancels badly in bf16
         deltas = [delta for delta in self.windows if delta < T]
         need_sin = self.angle or self.record
         sins = [sin_angle(z[:, delta:], z[:, :-delta]) for delta in deltas] if need_sin else []
         if not deltas:
             g = torch.zeros_like(h)
         else:
-            w = self._edge_weights(z, deltas, sins)
-            m = None
+            w = self._edge_weights(z, deltas, sins).to(z.dtype)
+            b_avg, s_sum = torch.zeros_like(z), z.new_zeros(B, T)
             for e, delta in enumerate(deltas):
                 a, b = z[:, delta:], z[:, :-delta]
-                x = torch.cat([a, b], -1) if self.kind == "concat" else a.unsqueeze(-1) * b.unsqueeze(-2)
-                scale = w[:, delta:, e]
+                s_e = w[:, delta:, e]
                 if self.normalize:
-                    scale = scale / pair_norm(a, b, self.kind).clamp_min(self.eps)
-                x = x * scale.reshape(*scale.shape, *([1] * (x.dim() - 2)))
-                x = F.pad(x, (0, 0) * (x.dim() - 2) + (delta, 0))
-                m = x if m is None else m + x
-            has_edge = (w.sum(-1, keepdim=True) > 0).to(h.dtype)
-            g = self.proj(self._features(m).to(h.dtype)) * has_edge
+                    s_e = s_e / pair_norm(a, b, self.kind).clamp_min(self.eps)
+                b_avg = b_avg + F.pad(s_e.unsqueeze(-1) * b, (0, 0, delta, 0))
+                s_sum = s_sum + F.pad(s_e, (delta, 0))
+            if self.kind == "concat":
+                g = self.proj(torch.cat([z * s_sum.unsqueeze(-1), b_avg], -1).to(h.dtype))
+            else:
+                outer = (z.unsqueeze(-1) * b_avg.unsqueeze(-2)).flatten(2)          # one pair per token
+                with _no_autocast(h):
+                    g = F.linear(outer, self._folded_weight().to(z.dtype), self.proj.bias.to(z.dtype))
+                g = g.to(h.dtype)
+            g = g * (w.sum(-1, keepdim=True) > 0).to(g.dtype)
             if self.record:
                 full = [F.pad(s, (delta, 0)) for s, delta in zip(sins, deltas)]
                 self.last = {"deltas": deltas, "weights": w.detach(), "sin": torch.stack(full, -1).detach()}
@@ -187,7 +215,7 @@ class PairMixer(nn.Module):
         Equal-weight averaging only; kept to test the fast path against."""
         assert not self.select
         B, T, d = h.shape
-        z = self.red(h).float()
+        z = _wide(self.red(h))
         g = torch.zeros_like(h)
         count = h.new_zeros(1, T, 1)
         for delta in self.windows:
