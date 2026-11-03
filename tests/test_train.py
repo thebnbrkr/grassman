@@ -170,3 +170,13 @@ def test_bootstrap_only_pairs_shared_seeds():
     a = [_fake_run(0, [500.0] * 10, tok), _fake_run(1, [520.0] * 10, tok)]
     b = [_fake_run(1, [520.0] * 10, tok)]
     assert analyze.paired_bootstrap(a, b, n=500)["seeds"] == [1]
+
+
+def test_pick_amp(monkeypatch):
+    cuda = torch.device("cuda")
+    assert train.pick_amp(torch.device("cpu")) is None
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda d=None: (7, 5))   # T4
+    assert train.pick_amp(cuda) is torch.float16
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda d=None: (8, 0))   # A100
+    assert train.pick_amp(cuda) is torch.bfloat16
+    assert train.pick_amp(cuda, "fp16") is torch.float16 and train.pick_amp(cuda, "off") is None

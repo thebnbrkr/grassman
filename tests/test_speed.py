@@ -56,3 +56,23 @@ def test_benchmark_helper_reports_tiny_differences():
     rows = fast_vs_reference(torch.device("cpu"), d=32, T=20, batch=2)
     assert len(rows) == 2 * len(PAIR_KINDS)
     assert all(r["max_out_diff"] < 1e-4 and r["max_grad_diff"] < 1e-4 for r in rows), rows
+
+
+@pytest.mark.parametrize("kind", PAIR_KINDS)
+@pytest.mark.parametrize("select", [False, True])
+def test_gradients_finite_with_zero_pairs(kind, select):
+    """Positions before an offset exists, and identical consecutive tokens,
+    give zero-length pairs; no gradient may become NaN or inf."""
+    torch.manual_seed(0)
+    m = PairMixer(32, kind=kind, r=8, windows=LONG, select=select, angle=select)
+    h = torch.randn(1, 1, 32).expand(2, 20, 32).contiguous().requires_grad_()
+    m(h).sum().backward()
+    assert torch.isfinite(h.grad).all()
+    assert all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None)
+
+
+def test_throughput_runs_on_cpu():
+    from grassman.bench import throughput
+    cfg = Config(mixer="grassmann", vocab_size=101, block_size=16, d=32, d_ff=64, n_layers=1)
+    r = throughput(cfg, torch.device("cpu"), steps=2, warmup=1, batch=2)
+    assert r["tok_per_s"] > 0 and r["amp"] == "fp32"

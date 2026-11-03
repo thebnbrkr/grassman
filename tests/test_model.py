@@ -79,3 +79,23 @@ def test_concat32_keeps_the_papers_token_compression():
     g = LM(Config(mixer="grassmann")).blocks[0].mixer
     assert m.r == g.r == 32 and pair_dim(m.kind, m.r) == 64
     assert LM(Config(mixer="concat32")).n_params() < LM(Config(mixer="attention")).n_params()
+
+
+def test_padded_output_layer_is_exact():
+    torch.manual_seed(0)
+    model = LM(Config(**TINY)).double()          # vocab 101 -> padded to 128 for the matmul
+    x = torch.randn(2, 5, 32, dtype=torch.float64)
+    torch.testing.assert_close(model.logits(x), model.head(x))
+    assert model.logits(x).shape[-1] == 101
+
+
+@pytest.mark.parametrize("mixer", MIXERS)
+def test_torch_compile_traces_without_graph_breaks(mixer):
+    """fullgraph=True fails on any graph break; backend='eager' checks tracing
+    only, so this runs on CPU without a compiler. Outputs must match."""
+    torch._dynamo.reset()
+    torch.manual_seed(0)
+    model = LM(Config(mixer=mixer, dropout=0.0, **TINY)).eval()
+    idx = torch.randint(0, 101, (2, 32))
+    compiled = torch.compile(model, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(idx, idx)[1], model(idx, idx)[1])

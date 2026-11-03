@@ -59,6 +59,11 @@ if RESTORE:
 
 
 TRAIN_HELPER = code("""
+# Run every model of this notebook on the same GPU type: precision differs (bf16 on A100/L4, fp16 on T4).
+# COMPILE = True uses torch.compile for every model (fair across models); turn it on only if speed.ipynb
+# showed compiled runs are faster on this GPU, since compiling costs time per run.
+COMPILE = False
+
 def train(mixer, seed, epochs=5, lr=1e-3, attn='', save=None, tag='pilot'):
     cmd = [sys.executable, '-m', 'grassman.train', '--mixer', mixer, '--seed', str(seed), '--lr', str(lr),
            '--epochs', str(epochs), '--tag', tag, '--data-dir', DATA, '--out', RUNS,
@@ -67,6 +72,8 @@ def train(mixer, seed, epochs=5, lr=1e-3, attn='', save=None, tag='pilot'):
         cmd += ['--attn-layers', attn]
     if save:
         cmd += ['--save', save]
+    if COMPILE:
+        cmd += ['--compile']
     print('>>', mixer, f'attn@{attn}' if attn else '', 'seed', seed, flush=True)
     subprocess.run(cmd, cwd=REPO, check=True)
 """)
@@ -105,7 +112,7 @@ The paper projects each offset's 496 Plücker numbers to 256 and then averages t
 3. **Where does the time go?** A profile of a few training steps.
 4. **Are matrix multiplies using tensor cores?** Plain matmul speed at this model's shapes, by precision and BLAS library. On the L4 the profile showed every matmul on a slow fallback kernel (`magma_sgemmEx`); this finds which setting fixes it.
 
-No data download is needed: speed is measured on random tokens. About 5 minutes on an A100.
+No data download is needed: speed is measured on random tokens. About 15 minutes on an A100 (compiling each model takes most of it).
 """),
             *setup("speed.json", data=False),
             md("## 1. Same numbers?\n\nDifferences of about 1e-5 or less are float32 rounding; anything larger is a bug."),
@@ -117,18 +124,27 @@ for r in fast_vs_reference(dev):
     print(f"{r['kind']:<8} normalize={str(r['normalize']):<5}  max output diff {r['max_out_diff']:.2e}   "
           f"max gradient diff {r['max_grad_diff']:.2e}")
 """),
-            md("## 2. How much faster? (training tokens/s, batch 32 × 128, bf16)"),
+            md("## 2. How much faster? (training tokens/s, batch 32 × 128)\n\nPrecision follows the training rule: bf16 on A100/L4/H100, fp16 with loss scaling on T4. Each model is timed eager (normal PyTorch) and compiled (`torch.compile`, which fuses small operations); the paper's order is timed eager for the pair models. Compiling takes a while per model (shown in brackets). About 10–15 minutes in total."),
             code("""
 from grassman.model import Config
+from grassman.train import pick_amp
+print('precision on this GPU:', pick_amp(dev))
 results = {}
+PAPER = ('grassmann', 'sym', 'outer', 'concat', 'concat32', 'g-dilated')
 for m in ['grassmann', 'sym', 'outer', 'concat', 'concat32', 'g-select', 'g-dilated', 'g-both', 'g-both-angle',
           'hyena', 'swa', 'attention']:
     cfg = Config(mixer=m)
-    fast = throughput(cfg, dev)
-    ref = throughput(cfg, dev, reference=True) if m in ('grassmann', 'sym', 'outer', 'concat', 'concat32', 'g-dilated') else None
-    results[m] = {'fast': fast, 'paper_order': ref}
-    print(f"{m:<13} fast {fast:>10,.0f} tok/s" + (f"   paper order {ref:>10,.0f}   speed-up {fast / ref:4.1f}x" if ref else ''))
-json.dump({'gpu': torch.cuda.get_device_name(), 'tok_per_s': results}, open(RUNS, 'w'), indent=1)
+    eager = throughput(cfg, dev)
+    comp = throughput(cfg, dev, compile=True)
+    ref = throughput(cfg, dev, reference=True) if m in PAPER else None
+    results[m] = {'eager': eager, 'compiled': comp, 'paper_order': ref}
+    line = (f"{m:<13} eager {eager['tok_per_s']:>9,.0f}   compiled {comp['tok_per_s']:>9,.0f} "
+            f"({comp['warmup_s']:3.0f}s)")
+    if ref:
+        line += (f"   paper order {ref['tok_per_s']:>9,.0f}   vs paper: eager {eager['tok_per_s'] / ref['tok_per_s']:.1f}x, "
+                 f"compiled {comp['tok_per_s'] / ref['tok_per_s']:.1f}x")
+    print(line, flush=True)
+json.dump({'gpu': torch.cuda.get_device_name(), 'results': results}, open(RUNS, 'w'), indent=1)
 """),
             md("## 3. Where does the time go?\n\nTop GPU operations over 10 training steps. If the same operations dominate for `attention` and `grassmann`, the cost is in the shared parts (embedding, output layer, loss, optimizer), not the mixer."),
             code("""
@@ -139,8 +155,9 @@ for m in ['attention', 'grassmann']:
     model = LM(Config(mixer=m)).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     x = torch.randint(0, 30522, (32, 128), device=dev)
+    amp = pick_amp(dev)
     def step():
-        with torch.autocast('cuda', dtype=torch.bfloat16):
+        with torch.autocast('cuda', dtype=amp):
             _, loss = model(x, x)
         opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
     for _ in range(5):

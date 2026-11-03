@@ -31,7 +31,7 @@ to see whether there is any effect before the full run.
 
 | notebook | question | A100 time (estimate) |
 |---|---|---|
-| `speed.ipynb` | does the fast Grassmann layer give identical numbers, how much faster is it, where does time go? | ~5 min |
+| `speed.ipynb` | does the fast Grassmann layer give identical numbers, how much faster is it (eager and compiled), where does time go, are matmuls on tensor cores? | ~15 min |
 | `choose_vs_reach.ipynb` | is the gap to attention about *choosing* which token (learned edge weights) or *reach* (dilated edges)? | ~45 min |
 | `hybrid.ipynb` | how much of the gap does one attention layer recover, and does the local mixer type matter? | ~1 h |
 | `readouts.ipynb` | are the learned edge choices readable, used and meaningful? | ~15 min |
@@ -90,7 +90,7 @@ The protocol in [PROTOCOL.md](PROTOCOL.md) was fixed before any run. In short:
 
 ## Tests
 
-`python -m pytest -q`: 187 tests in about 90 s on CPU. They cover:
+`python -m pytest -q`: 210 tests in about 70 s on CPU. They cover:
 
 - **Plücker maths:** the definition, equality with the cross product in 3-D, sign flip under swap, zero for
   parallel vectors, scaling by det(M) within the plane.

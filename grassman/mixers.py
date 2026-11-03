@@ -64,9 +64,10 @@ def _no_autocast(h: torch.Tensor):
     return torch.autocast("cuda", enabled=False) if h.is_cuda else contextlib.nullcontext()
 
 
-def pair_norm(a: torch.Tensor, b: torch.Tensor, kind: str) -> torch.Tensor:
-    """||pair_features(a, b, kind)|| in closed form, without building the features.
-    antisym uses Lagrange's identity ||a ^ b||^2 = |a|^2 |b|^2 - (a.b)^2."""
+def pair_norm(a: torch.Tensor, b: torch.Tensor, kind: str, eps: float = 0.0) -> torch.Tensor:
+    """max(||pair_features(a, b, kind)||, eps) in closed form, without building the
+    features. antisym uses Lagrange's identity ||a ^ b||^2 = |a|^2 |b|^2 - (a.b)^2.
+    Clamping the square (not the root) keeps the gradient finite at zero pairs."""
     aa, bb, ab = (a * a).sum(-1), (b * b).sum(-1), (a * b).sum(-1)
     if kind == "antisym":
         sq = aa * bb - ab * ab
@@ -78,12 +79,12 @@ def pair_norm(a: torch.Tensor, b: torch.Tensor, kind: str) -> torch.Tensor:
         sq = aa + bb
     else:
         raise ValueError(f"unknown pair kind {kind!r}")
-    return sq.clamp_min(0).sqrt()
+    return sq.clamp_min(eps * eps).sqrt()
 
 
 def sin_angle(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """sin of the angle between a and b: 0 = same direction, 1 = orthogonal."""
-    return pair_norm(a, b, "antisym") / (a.norm(dim=-1) * b.norm(dim=-1)).clamp_min(eps)
+    return pair_norm(a, b, "antisym", eps) / (a.norm(dim=-1) * b.norm(dim=-1)).clamp_min(eps)
 
 
 class PairMixer(nn.Module):
@@ -100,7 +101,9 @@ class PairMixer(nn.Module):
     the layer is one pair of the current token with a weighted average of its
     past window (for concat the first half is z_t * sum_delta s_delta). We
     build that one pair and fold the upper-triangle selection into the
-    projection weights (`_folded_weight`), so there is no per-token gather.
+    projection weights (`_folded_weight`), so there is no per-token gather,
+    and take all offsets at once from one strided window (`_past`), so there
+    is no Python loop over offsets.
     `reference_forward` is the paper's order; tests/test_speed.py checks both
     give the same outputs and gradients.
 
@@ -133,6 +136,9 @@ class PairMixer(nn.Module):
                 self.angle_weight = nn.Parameter(torch.zeros(1))
         self.record, self.last, self.drop_edge = False, None, None
         self.use_reference = False   # benchmark switch: run the paper's (slow) order of operations
+        self.register_buffer("_deltas", torch.tensor(self.windows), persistent=False)
+        D = max(self.windows)
+        self.register_buffer("_win_idx", torch.tensor([D - delta for delta in self.windows]), persistent=False)
         if kind in ("antisym", "sym"):
             i, j = torch.triu_indices(self.r, self.r, offset=1 if kind == "antisym" else 0)
             self.register_buffer("_ij", i * self.r + j, persistent=False)
@@ -142,26 +148,28 @@ class PairMixer(nn.Module):
     def reach(self) -> int:
         return max(self.windows)
 
-    def _edge_weights(self, z: torch.Tensor, deltas: list[int], sins: list) -> torch.Tensor:
+    def _past(self, z: torch.Tensor) -> torch.Tensor:
+        """(B, T, E, r): z_{t - delta} for every offset, zero where t - delta < 0.
+        One strided window plus one small index, instead of a loop over offsets."""
+        D = max(self.windows)
+        win = F.pad(z, (0, 0, D, 0)).unfold(1, D + 1, 1)          # (B, T, r, D+1); [..., k] = z_{t-D+k}
+        return win.index_select(-1, self._win_idx).transpose(-1, -2)
+
+    def _edge_weights(self, z: torch.Tensor, past: torch.Tensor, sin) -> torch.Tensor:
         """(B, T, E) weights over the offsets; zero where t - delta < 0, and on
         rows with no valid offset (t = 0)."""
         B, T, _ = z.shape
-        t = torch.arange(T, device=z.device)
-        valid = t[:, None] >= torch.tensor(deltas, device=z.device)[None, :]      # (T, E)
-        if self.drop_edge in deltas:
-            valid[:, deltas.index(self.drop_edge)] = False
+        valid = torch.arange(T, device=z.device)[:, None] >= self._deltas[None, :]   # (T, E)
+        if self.drop_edge in self.windows:
+            valid[:, self.windows.index(self.drop_edge)] = False
         if not self.select:
-            w = valid.float() / valid.sum(-1, keepdim=True).clamp_min(1)
-            return w.expand(B, T, len(deltas))
+            w = valid.to(z.dtype) / valid.sum(-1, keepdim=True).clamp_min(1)
+            return w.expand(B, T, len(self.windows))
         Wa, Wb = self.score_in.weight[:, :self.r], self.score_in.weight[:, self.r:]
-        za, zb = z @ Wa.T + self.score_in.bias, z @ Wb.T
-        scores = z.new_full((B, T, len(deltas)), float("-inf"))
-        for e, delta in enumerate(deltas):
-            s = self.score_out(F.leaky_relu(za[:, delta:] + zb[:, :-delta], 0.2)).squeeze(-1)
-            s = s + self.edge_bias[e]
-            if self.angle:
-                s = s + self.angle_weight * sins[e]
-            scores[:, delta:, e] = s
+        pre = (z @ Wa.T + self.score_in.bias).unsqueeze(2) + past @ Wb.T          # (B, T, E, score_dim)
+        scores = self.score_out(F.leaky_relu(pre, 0.2)).squeeze(-1) + self.edge_bias
+        if self.angle:
+            scores = scores + self.angle_weight * sin
         scores = scores.masked_fill(~valid, float("-inf"))
         scores = torch.where(valid.any(-1)[None, :, None], scores, torch.zeros_like(scores))
         return torch.softmax(scores, dim=-1) * valid
@@ -181,32 +189,24 @@ class PairMixer(nn.Module):
             return self.reference_forward(h)
         B, T, d = h.shape
         z = _wide(self.red(h))       # a_i b_j - a_j b_i cancels badly in bf16
-        deltas = [delta for delta in self.windows if delta < T]
-        need_sin = self.angle or self.record
-        sins = [sin_angle(z[:, delta:], z[:, :-delta]) for delta in deltas] if need_sin else []
-        if not deltas:
-            g = torch.zeros_like(h)
+        past = self._past(z)                                            # (B, T, E, r)
+        a = z.unsqueeze(2)
+        sin = sin_angle(a, past) if (self.angle or self.record) else None
+        w = self._edge_weights(z, past, sin).to(z.dtype)               # (B, T, E)
+        s_e = w / pair_norm(a, past, self.kind, self.eps) if self.normalize else w
+        b_avg = torch.einsum("bte,bter->btr", s_e, past)                # weighted average of the past
+        if self.kind == "concat":
+            g = self.proj(torch.cat([z * s_e.sum(-1, keepdim=True), b_avg], -1).to(h.dtype))
         else:
-            w = self._edge_weights(z, deltas, sins).to(z.dtype)
-            b_avg, s_sum = torch.zeros_like(z), z.new_zeros(B, T)
-            for e, delta in enumerate(deltas):
-                a, b = z[:, delta:], z[:, :-delta]
-                s_e = w[:, delta:, e]
-                if self.normalize:
-                    s_e = s_e / pair_norm(a, b, self.kind).clamp_min(self.eps)
-                b_avg = b_avg + F.pad(s_e.unsqueeze(-1) * b, (0, 0, delta, 0))
-                s_sum = s_sum + F.pad(s_e, (delta, 0))
-            if self.kind == "concat":
-                g = self.proj(torch.cat([z * s_sum.unsqueeze(-1), b_avg], -1).to(h.dtype))
-            else:
-                outer = (z.unsqueeze(-1) * b_avg.unsqueeze(-2)).flatten(2)          # one pair per token
-                with _no_autocast(h):
-                    g = F.linear(outer, self._folded_weight().to(z.dtype), self.proj.bias.to(z.dtype))
-                g = g.to(h.dtype)
-            g = g * (w.sum(-1, keepdim=True) > 0).to(g.dtype)
-            if self.record:
-                full = [F.pad(s, (delta, 0)) for s, delta in zip(sins, deltas)]
-                self.last = {"deltas": deltas, "weights": w.detach(), "sin": torch.stack(full, -1).detach()}
+            outer = (z.unsqueeze(-1) * b_avg.unsqueeze(-2)).flatten(2)      # one pair per token
+            with _no_autocast(h):
+                g = F.linear(outer, self._folded_weight().to(z.dtype), self.proj.bias.to(z.dtype))
+            g = g.to(h.dtype)
+        g = g * (w.sum(-1, keepdim=True) > 0).to(g.dtype)
+        if self.record:
+            keep = [e for e, delta in enumerate(self.windows) if delta < T]
+            self.last = {"deltas": [self.windows[e] for e in keep],
+                         "weights": w[..., keep].detach(), "sin": sin[..., keep].detach()}
         alpha = torch.sigmoid(self.gate(torch.cat([h, g], dim=-1)))
         return self.drop(self.norm(alpha * h + (1 - alpha) * g))
 

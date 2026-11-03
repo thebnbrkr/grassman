@@ -45,6 +45,18 @@ def pick_device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def pick_amp(device: torch.device, choice: str = "auto"):
+    """Autocast dtype: bf16 where the GPU has bf16 tensor cores (compute
+    capability >= 8: A100, L4, H100), fp16 below that (T4, V100), where bf16
+    falls back to slow kernels; None (fp32) off CUDA."""
+    if choice == "off" or device.type != "cuda":
+        return None
+    if choice in ("bf16", "fp16"):
+        return torch.bfloat16 if choice == "bf16" else torch.float16
+    major, _ = torch.cuda.get_device_capability(device)
+    return torch.bfloat16 if major >= 8 else torch.float16
+
+
 def lr_at(step: int, total: int, lr: float, warmup: int, min_ratio: float = 0.1) -> float:
     """Linear warm-up, then cosine decay to min_ratio * lr."""
     if step < warmup:
@@ -164,6 +176,8 @@ def main(argv=None) -> dict | None:
     ap.add_argument("--attn-layers", default="",
                     help="comma-separated layer indices that use full attention (hybrids), e.g. 5")
     ap.add_argument("--save", default=None, help="save the best-validation weights here (.pt)")
+    ap.add_argument("--amp", choices=("auto", "bf16", "fp16", "off"), default="auto",
+                    help="auto: bf16 on compute capability >= 8, fp16 (with loss scaling) below")
     args = ap.parse_args(argv)
     attn_layers = tuple(int(i) for i in args.attn_layers.split(",") if i.strip())
 
@@ -177,7 +191,8 @@ def main(argv=None) -> dict | None:
         return None
 
     device = pick_device(args.device)
-    amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else None
+    amp_dtype = pick_amp(device, args.amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype is torch.float16)
     seed_all(args.seed)
 
     splits = data.load(args.data_dir)
@@ -217,9 +232,11 @@ def main(argv=None) -> dict | None:
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"non-finite loss at step {step}")
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             losses.append(loss.item())
             train_tokens += yb.numel()
             step += 1
@@ -254,6 +271,7 @@ def main(argv=None) -> dict | None:
         "peak_mem_mb": torch.cuda.max_memory_allocated() / 2**20 if device.type == "cuda" else None,
         "wall_s": time.time() - t_start,
         "device": torch.cuda.get_device_name() if device.type == "cuda" else device.type,
+        "amp": str(amp_dtype).replace("torch.", "") if amp_dtype else "fp32", "compile": args.compile,
         "torch": torch.__version__, "commit": git_commit(), "history": history,
         "test_detail": best["test_detail"],
     }

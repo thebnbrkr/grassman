@@ -17,28 +17,34 @@ def set_reference(model: torch.nn.Module, on: bool) -> None:
 
 
 def throughput(cfg: Config, device: torch.device, steps: int = 50, warmup: int = 10,
-               batch: int = 32, reference: bool = False) -> float:
-    """Training tokens per second on random tokens (forward, backward, AdamW)."""
+               batch: int = 32, reference: bool = False, compile: bool = False) -> dict:
+    """Training tokens per second on random tokens (forward, backward, AdamW),
+    with the same precision rule as training. warmup_s includes compilation."""
+    from .train import pick_amp
     torch.manual_seed(0)
     model = LM(cfg).to(device)
     set_reference(model, reference)
+    fwd = torch.compile(model) if compile else model
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    amp = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else None
+    amp = pick_amp(device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp is torch.float16)
     x = torch.randint(0, cfg.vocab_size, (batch, cfg.block_size), device=device)
-    t0 = None
+    t_start, t0 = time.time(), None
     for step in range(warmup + steps):
         if step == warmup:
             if device.type == "cuda":
                 torch.cuda.synchronize()
             t0 = time.time()
         with torch.autocast(device.type, dtype=amp, enabled=amp is not None):
-            _, loss = model(x, x)
+            _, loss = fwd(x, x)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
     if device.type == "cuda":
         torch.cuda.synchronize()
-    return steps * batch * cfg.block_size / (time.time() - t0)
+    return {"tok_per_s": steps * batch * cfg.block_size / (time.time() - t0), "warmup_s": t0 - t_start,
+            "amp": str(amp).replace("torch.", "") if amp else "fp32"}
 
 
 def fast_vs_reference(device: torch.device, d: int = 256, T: int = 128, batch: int = 8) -> list[dict]:

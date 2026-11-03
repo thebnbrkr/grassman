@@ -365,3 +365,33 @@ g-both-angle 12,803; hyena 20,760; swa 20,916; attention 20,849.
 1. fp16 + GradScaler below compute capability 8.0 (T4, V100).
 2. Pad the output-layer vocabulary to a multiple of 8, exact by slicing the logits.
 3. Batch the offset loop into one tensor op and enable `torch.compile` for all models.
+
+---
+
+## 2026-11-03 (later): Three more speed changes (not yet measured on a GPU)
+
+1. **No Python loop over offsets.**
+   - `PairMixer._past` takes all offsets from one strided window (`unfold`) and one small `index_select`, giving
+     (B, T, E, r). Norms, edge scores and the weighted average are then single batched operations (`einsum`).
+   - `pair_norm` now clamps the *square* at eps²: same value as clamping the norm, but a finite gradient at
+     zero-length pairs. Zero pairs now occur for every position before an offset exists, and the earlier version
+     gave NaN gradients there; caught by the fp64 equivalence test.
+2. **Padded output layer.** The matmul uses the vocabulary padded to a multiple of 64 (30,522 → 30,528), then
+   slices back. Exactly `head(x)` (tested in fp64).
+3. **Precision by GPU.** bf16 on compute capability ≥ 8; fp16 with a GradScaler below that (T4). `--amp`
+   overrides, and the run record stores `amp` and `compile`.
+4. **`torch.compile`.** `speed.ipynb` times every model eager and compiled. The experiment notebooks have
+   `COMPILE = False` until that measurement says otherwise. Every model traces with `fullgraph=True` (tested on
+   CPU with the eager backend).
+
+**Tests:** 210 pass. New: finite gradients with zero pairs (all kinds, with and without selection), the padded
+head is exact, the precision rule (T4 → fp16, A100 → bf16), throughput on CPU, and no graph breaks for any
+model.
+
+**Expectations (qualitative only, after the 1.5–3× miss):**
+- On the T4, fp16 should lift every model above the ~21k tok/s ceiling.
+- On the A100, compiling should help the pair models most, since they were launch-bound.
+- To be measured with `speed.ipynb` on both GPUs.
+
+**Caveat:** fp16 (T4) and bf16 (A100) runs are not directly comparable. Each notebook's models must run on one
+GPU type.
