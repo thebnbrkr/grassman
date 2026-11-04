@@ -2,11 +2,14 @@
 
     python notebooks/make_memtest_notebooks.py
 
-store_test.ipynb    Track A: the associative matrix as a store, vs FAISS (PQ at equal memory, HNSW, exact)
-recall_test.ipynb   Track B: memory layers inside a Hyena model on long-range recall
+memory_test.ipynb   one notebook, two parts:
+                    Track A: the associative matrix as a store, vs FAISS (PQ at equal memory, HNSW, exact)
+                    Track B: memory layers inside a Hyena model on long-range recall
 
-Both save results under /content/results.
+Results go under /content/results (store.jsonl, recall.jsonl).
 """
+import re
+
 from make_notebooks import DOWNLOAD, code, md, setup, write
 
 
@@ -207,6 +210,36 @@ plt.savefig(f'{OUTDIR}/recall_by_distance.png', dpi=150, bbox_inches='tight'); p
             *DOWNLOAD]
 
 
+def _rename(cells, new):
+    """Point a part's cells at its own results file (RUNS -> new)."""
+    for c in cells:
+        c["source"] = [re.sub(r"\bRUNS\b", new, line) for line in c["source"]]
+    return cells
+
+
+def memory_test():
+    store, recall = store_test(), recall_test()
+    n_store_setup, n_recall_setup = 7, 6        # setup() cells, with and without the extra pip cell
+    return [md("""
+# Memory tests: the associative matrix as a store (Track A), and memory layers inside Hyena (Track B)
+
+Protocol, decision rules and predictions, written before any run: `memtest/PROTOCOL.md`.
+
+- **Track A** (CPU work, minutes to about an hour): is linear attention's fixed matrix a useful store? It is compared with FAISS at **equal memory** (PQ), plus HNSW and exact search as ceilings. Results: `/content/results/store.jsonl`.
+- **Track B** (GPU work, the long part): does a cheap memory layer (delta rule, or a lookup over chunk summaries) give a Hyena model long-range recall like one attention layer, with less memory? Results: `/content/results/recall.jsonl`.
+
+**Use an A100 runtime** for the whole notebook (Track A runs on its CPU). Times are not measured yet: check Track B's pilot cell before its main stage. Finished stages and runs are skipped on re-run; after a deleted runtime set `RESTORE = True` and upload `results.zip`.
+"""),
+            *setup("store.jsonl", data=False)[:2],
+            code("!pip install -q faiss-cpu sentence-transformers"),
+            *setup("store.jsonl", data=False)[2:],
+            code("STORE_RUNS, RECALL_RUNS = f'{OUTDIR}/store.jsonl', f'{OUTDIR}/recall.jsonl'"),
+            md("# Track A: the matrix as a store"),
+            *_rename(store[1 + n_store_setup:-2], "STORE_RUNS"),
+            md("# Track B: memory layers inside Hyena"),
+            *_rename(recall[1 + n_recall_setup:-2], "RECALL_RUNS"),
+            *DOWNLOAD]
+
+
 if __name__ == "__main__":
-    write("store_test.ipynb", store_test())
-    write("recall_test.ipynb", recall_test())
+    write("memory_test.ipynb", memory_test())
