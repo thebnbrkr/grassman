@@ -613,3 +613,112 @@ attention (200.2) reproduce the earlier notebooks.
 - "The local mixer type matters little inside a hybrid (≤ 3%)": hybrids range from 184 to 248.
 - "Layer 3 vs 6 is a small difference": 8%.
 - Hyena beating attention was not predicted.
+
+---
+
+## 2026-11-04: Full protocol — results, two independent runs (commit 2702c74)
+
+The confirmatory experiment from `PROTOCOL.md`, run twice with the same code:
+
+| run | hardware | precision | wall time | source |
+|---|---|---|---|---|
+| **A** | 1 × A100-SXM4-40GB (Colab) | bf16, compiled | not recorded (est. ~4 h from throughput) | `grassman_colab (2).ipynb` outputs only |
+| **B** | 3 × NVIDIA B200 | bf16, compiled, torch 2.8 | 52 min (05:56–06:48), 2.4 GPU-hours | `grassman_results.zip` (`runs.jsonl`, logs) |
+
+Both: 210 tests pass; LR sweep (3 LRs × 10 epochs, seed 0, validation only); then 3 seeds × 30 epochs per
+model, test set at the best-validation epoch.
+
+The LR sweep chose the same LRs in both runs except `outer` and `concat`: 3e-3 in A, 1e-3 in B. The sweep is one
+seed, so near-ties between LRs can flip between machines.
+
+### Main table (test perplexity, mean ± 95% interval over 3 seeds)
+
+| model | A: test ppl | B: test ppl | vs attention (A / B) |
+|---|---|---|---|
+| grassmann (paper) | 267.1 ± 4.1 | 265.2 ± 2.3 | +47.8% / +46.8% |
+| grassmann-raw (no L2 norm) | 270.3 ± 7.8 | 268.6 ± 10.0 | +49.6% / +48.7% |
+| sym | 273.6 ± 3.8 | 273.4 ± 3.9 | +51.4% / +51.3% |
+| outer | 270.4 ± 12.1 | 269.3 ± 2.8 | +49.7% / +49.1% |
+| concat | **259.0 ± 4.4** | 263.5 ± 2.1 | +43.4% / +45.8% |
+| concat32 | 265.0 ± 7.0 | 265.6 ± 8.0 | +46.7% / +47.0% |
+| g-select | 204.1 ± 3.7 | 204.5 ± 0.9 | +13.0% / +13.2% |
+| hyena (16-step) | 192.1 ± 1.5 | 192.9 ± 2.3 | +6.3% / +6.8% |
+| **hyena+attn@5** | **174.8 ± 2.6** | **175.3 ± 1.8** | **−3.3% / −3.0%** |
+| swa (window 16) | 192.5 ± 3.5 | 192.5 ± 2.2 | +6.6% / +6.5% |
+| attention | 180.7 ± 3.7 | 180.7 ± 2.2 | — |
+
+Apart from concat, every model agrees between the runs to within 1.6 perplexity.
+
+Best epoch (run B, seed 0): the pair models peak at epochs 13–15 (concat32 at 20, g-select at 18), hyena at 13,
+swa at 20, attention at 23.
+
+Throughput on B200: grassmann 418k tok/s, hyena 511k, attention 585k. On A100: 252k, 296k, 338k. At 128 tokens,
+attention is the fastest mixer.
+
+### Confirmatory family (Holm-corrected; difference = other − grassmann, + means the paper's layer is better)
+
+| other | A: diff [95% cluster CI], Holm p, wins | B: diff [95% cluster CI], Holm p, wins |
+|---|---|---|
+| sym | +6.55 [+4.77, +8.49], 0.0008, 3/3 | +8.18 [+6.22, +10.23], 0.0008, 3/3 |
+| outer | +3.32 [+0.55, +5.50], 0.0208, 2/3 | +4.10 [+2.01, +6.08], 0.0008, 3/3 |
+| concat | **−8.02 [−10.37, −6.01], 0.0008, 0/3** | **−1.72 [−3.31, +0.30], 0.0858, 0/3** |
+| attention | −86.39 [−99.38, −73.61], 0.0008, 0/3 | −84.53 [−96.83, −72.09], 0.0008, 0/3 |
+
+### Q1 (does the geometry matter?): **No.** The same verdict in both runs.
+
+The pre-registered rule needed `sym`, `outer` **and** `concat` all to be significantly worse, with grassmann winning
+every seed. Concatenation is never worse:
+- In run A it is significantly better (−8.0).
+- In run B it is better in all 3 seeds but not significantly (−1.7, p = 0.086).
+
+The size of the concat advantage depends on the LR the sweep picked, so we report it as **0 to 8 perplexity in
+concat's favour**.
+
+What does hold, in both runs:
+- **Order matters.** `sym` is worse by 6.6–8.2, in 3/3 seeds.
+- **The antisymmetric form beats the full outer product slightly**, by 3.3–4.1.
+
+But the plain ordered pair [z_t, z_{t−Δ}] does at least as well. **The Plücker coordinates add nothing over
+concatenation.**
+
+Exploratory:
+- `concat32` vs grassmann: −2.1 (p = 0.07) in A, +0.3 (p = 0.69) in B, so no difference at equal r. This **does not
+  confirm** the 5-epoch hybrid pilot, where Plücker beat concat32 by 3.8%.
+- L2 normalisation of pair features helps slightly: grassmann-raw is worse by 3.3–3.4 in both runs.
+
+### Q2 (gap to a transformer): **47–48%, against the paper's 10–15%** (and 22.6% in the earlier reproduction)
+
+- Our grassmann (265–267) is close to the paper's 275.7.
+- Our size-matched attention (180.7) is far better than the paper's transformer (241.0–253.6).
+
+This supports the pilot reading that **the paper's transformer baseline was weak**. The gap is in the comparison,
+not in the reproduction of their layer.
+
+### Exploratory models (chosen after the pilots, so not claims)
+
+- **Choosing closes ~72–73% of the gap.** g-select is at 204 vs grassmann 266 and attention 181. The 5-epoch pilot
+  said 78%, so the result holds at 30 epochs.
+- **Short Hyena does not beat attention at 30 epochs.** It is worse by 12.2 [9.6, 14.9], p = 0.0002, 3/3 seeds
+  (run B, paired against attention). **This reverses the 5-epoch pilot** (192 vs 200). The pilot measured early
+  learning speed. Hyena and swa (both 16 tokens back) end up tied (192.1–192.9 vs 192.5).
+- **Hyena + one attention layer beats full attention.** By 5.4 perplexity [2.1, 9.6], p = 0.0004, 3/3 seeds
+  (−6.2, −3.7, −6.3; run B, paired cluster bootstrap against attention). Run A gives the same mean gap (−5.9).
+  This is the best model in both runs. Caveats:
+  - it was added after seeing the pilots;
+  - one dataset, at 128 tokens;
+  - it is slower than attention at this length.
+- **The gap is not reach.** At positions 0–15, every mixer sees the same context. Yet the pair models are still at
+  301–310 there, against 264 for attention and 250–254 for hyena. They use the context they have worse. This
+  matches the choose-vs-reach result.
+
+### Prediction check
+
+- **Right:**
+  - Q1 not shown (the pilot had Plücker ≈ concat);
+  - order matters;
+  - the paper's transformer is weak;
+  - choosing holds up at 30 epochs.
+- **Wrong:**
+  - "short Hyena beats attention" (pilot) — reversed;
+  - "Plücker beats concat at equal r" (hybrid pilot) — not confirmed;
+  - the ~9 h run-time estimate: run B took 52 min on 3 B200s, and run A is estimated at ~4 h.
